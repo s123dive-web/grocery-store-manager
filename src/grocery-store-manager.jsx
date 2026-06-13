@@ -21,6 +21,12 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const escapeHtml = (s) =>
   String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// Brand + payment assets (served from /public). Absolute origin so they also load
+// inside the print window (which is about:blank and can't resolve relative paths).
+const LOGO_SRC = "/logo.jpg";
+const PAYMENT_QR_SRC = "/payment-qr.jpg";
+const assetUrl = (p) => (typeof location !== "undefined" ? location.origin : "") + p;
+
 // Open a thermal-style receipt in a new window and trigger the print dialog.
 function printReceipt(sale) {
   const rows = sale.lines
@@ -35,11 +41,16 @@ function printReceipt(sale) {
     `<!doctype html><html><head><meta charset="utf-8"><title>Receipt</title>
     <style>body{font-family:'Courier New',monospace;padding:10px;width:280px;color:#000}
     h2{text-align:center;margin:4px 0}.meta{text-align:center;font-size:11px}
+    .logo{display:block;margin:0 auto 2px;height:46px;object-fit:contain}
     table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
     td{padding:2px 0}.c{text-align:center}.r{text-align:right}
     .tot td{border-top:1px dashed #000;font-weight:bold;padding-top:4px}
-    .ft{text-align:center;font-size:11px;margin-top:8px;border-top:1px dashed #000;padding-top:6px}</style>
+    .ft{text-align:center;font-size:11px;margin-top:8px;border-top:1px dashed #000;padding-top:6px}
+    .pay{text-align:center;margin-top:10px;border-top:1px dashed #000;padding-top:8px}
+    .pay img{width:150px;height:150px;object-fit:contain}
+    .pay .lbl{font-size:11px;font-weight:bold;margin-top:2px}</style>
     </head><body>
+    <img class="logo" src="${assetUrl(LOGO_SRC)}" alt="" onerror="this.style.display='none'" />
     <h2>${escapeHtml(STORE.name)}</h2>
     <div class="meta">${escapeHtml(STORE.address)}</div>
     <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
@@ -48,7 +59,11 @@ function printReceipt(sale) {
     </table>
     ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
     <div class="ft">Thank you! Please visit again.</div>
-    <script>window.onload=function(){window.print()}</scr` + `ipt>
+    <div class="pay">
+      <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
+      <div class="lbl">Scan to Pay · PhonePe / UPI</div>
+    </div>
+    <script>window.onload=function(){setTimeout(function(){window.print()},250)}</scr` + `ipt>
     </body></html>`
   );
   w.document.close();
@@ -417,7 +432,7 @@ function Login({ onAuth }) {
       <style>{CSS}</style>
       <form onSubmit={submit} style={{ background: "#fff", borderRadius: 16, padding: "26px 24px", width: "min(380px, 94vw)", boxShadow: "0 12px 40px rgba(0,0,0,.3)" }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ ...S.logoMark, width: 44, height: 44, fontSize: 20 }}>P</div>
+          <img src={LOGO_SRC} alt="Prakash Super Mart" style={{ width: 52, height: 52, borderRadius: 12, objectFit: "contain", flexShrink: 0 }} />
           <div>
             <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>{STORE.name}</div>
             <div style={{ fontSize: 11.5, color: "#8A9C90" }}>{STORE.address}</div>
@@ -606,7 +621,7 @@ function StoreManager({ onLogout }) {
       {/* sidebar */}
       <nav className="nav" style={S.nav}>
         <div style={S.logo}>
-          <div style={S.logoMark}>P</div>
+          <img src={LOGO_SRC} alt="Prakash Super Mart" style={{ width: 42, height: 42, borderRadius: 10, objectFit: "contain", background: "#fff", padding: 2, flexShrink: 0 }} />
           <div>
             <div style={{ fontWeight: 800, fontSize: 14.5, letterSpacing: "-0.02em" }}>{STORE.name}</div>
             <div style={{ fontSize: 10.5, color: "#9DB5A8", lineHeight: 1.3 }}>{STORE.address}</div>
@@ -938,6 +953,12 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
               </div>
               {pay === "Udhari" && (
                 <input className="input" style={{ marginTop: 8 }} placeholder="Customer name (paying later)" value={customer} onChange={(e) => setCustomer(e.target.value)} />
+              )}
+              {pay === "UPI" && (
+                <div style={{ textAlign: "center", marginTop: 10, padding: 8, background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10 }}>
+                  <img src={PAYMENT_QR_SRC} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain" }} />
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: "#3A5547" }}>Scan to Pay · PhonePe / UPI</div>
+                </div>
               )}
               <button className="btn primary big" onClick={completeSale} style={{ marginTop: 12, width: "100%" }}>
                 Complete sale · {INR(total)} · {pay}
