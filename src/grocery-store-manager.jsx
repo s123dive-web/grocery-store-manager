@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   ResponsiveContainer, AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
@@ -46,6 +46,7 @@ function printReceipt(sale) {
     <table>${rows}
     <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
     </table>
+    ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
     <div class="ft">Thank you! Please visit again.</div>
     <script>window.onload=function(){window.print()}</scr` + `ipt>
     </body></html>`
@@ -57,8 +58,18 @@ const CATEGORIES = [
   "Cold Drinks & Water", "Ice Cream", "Chocolates & Candy", "Snacks & Biscuits",
   "Dairy & Eggs", "Bakery & Bread", "Staples & Grains", "Fruits & Vegetables",
   "Oil & Ghee", "Beverages", "Spices & Masala", "Frozen & Instant",
-  "Personal Care", "Household & Cleaning", "Other",
+  "Personal Care", "Household & Cleaning", "Stationery", "Sports & Toys", "Other",
 ];
+// A small emoji icon per category (used in place of product photos).
+const CATEGORY_ICONS = {
+  "Cold Drinks & Water": "🥤", "Ice Cream": "🍦", "Chocolates & Candy": "🍫",
+  "Snacks & Biscuits": "🍪", "Dairy & Eggs": "🥛", "Bakery & Bread": "🍞",
+  "Staples & Grains": "🌾", "Fruits & Vegetables": "🥦", "Oil & Ghee": "🛢️",
+  "Beverages": "☕", "Spices & Masala": "🌶️", "Frozen & Instant": "🍜",
+  "Personal Care": "🧴", "Household & Cleaning": "🧹", "Stationery": "✏️",
+  "Sports & Toys": "🏏", "Other": "📦",
+};
+const iconFor = (category) => CATEGORY_ICONS[category] || "📦";
 
 // Catalog tuned for a Pashan–Baner (Pune) society convenience store:
 // top-up shoppers, kids' favourites, always-moving chilled stock.
@@ -182,11 +193,28 @@ const SEED_ITEMS = [
   ["Scotch-Brite Scrub Pad", "Household & Cleaning", "pc", 18, 25, 15, 5],
   ["Good Knight Refill", "Household & Cleaning", "pc", 65, 75, 12, 4],
   ["Aluminium Foil 9m", "Household & Cleaning", "pc", 50, 65, 8, 3],
-].map(([name, category, unit, buyPrice, sellPrice, stock, lowAt]) => ({
-  id: uid(), name, category, unit, buyPrice, sellPrice, stock, lowAt, createdAt: todayStr(),
+  // Stationery
+  ["Classmate Notebook 180pg", "Stationery", "pc", 45, 60, 0, 5],
+  ["Reynolds Ball Pen (Blue)", "Stationery", "pc", 6, 10, 0, 10],
+  ["Apsara Pencil", "Stationery", "pc", 4, 7, 0, 10],
+  ["Non-Dust Eraser", "Stationery", "pc", 3, 5, 0, 10],
+  ["Scale 30cm", "Stationery", "pc", 8, 15, 0, 5],
+  ["A4 Paper Ream (500)", "Stationery", "packet", 260, 320, 0, 3],
+  ["Glue Stick", "Stationery", "pc", 18, 28, 0, 5],
+  ["Marker Pen", "Stationery", "pc", 22, 35, 0, 5],
+  // Sports & Toys — MRP given as 8th value where it differs from selling price
+  ["Hard Hitter Cricket Bat", "Sports & Toys", "pc", 2200, 3500, 0, 2, 2200],
+  ["Sixit Cricket Balls", "Sports & Toys", "pc", 310, 490, 0, 3, 510],
+  ["Abdominal Safety Guard", "Sports & Toys", "pc", 120, 180, 0, 3],
+  ["Batting Supporter", "Sports & Toys", "pc", 90, 140, 0, 3],
+].map(([name, category, unit, buyPrice, sellPrice, , lowAt, mrp]) => ({
+  // Fresh start: every catalogue item begins at 0 stock with no batches.
+  id: uid(), name, category, unit, buyPrice, sellPrice, mrp: mrp ?? sellPrice,
+  stock: 0, lowAt, batches: [], icon: iconFor(category), createdAt: todayStr(),
 }));
 
-const STORAGE_KEY = "kirana-data-v2";
+// Bumped to wipe earlier sales/expenses/logs and reset stock to 0 for the relaunch.
+const STORAGE_KEY = "psm-data-v1";
 // Categories of activity recorded in the global Activity Log.
 const LOG_TYPES = ["sale", "inventory", "expense", "import", "backup"];
 
@@ -198,6 +226,36 @@ const STORE = {
   address: "Shop No. 16, Nancy Hill View, Baner, Pune 411021",
   phone: "",
 };
+
+// ---------- stock / expiry batch helpers ----------
+// Each item tracks stock as dated batches { id, qty, expiry, addedOn }; `stock` is the
+// cached sum. Adding stock appends a batch; selling depletes batches FIFO by expiry.
+const batchSort = (a, b) => (String(a.expiry || "9999-99-99") < String(b.expiry || "9999-99-99") ? -1 : 1);
+
+function addBatch(item, qty, expiry, date) {
+  const q = +qty || 0;
+  if (q <= 0) return item;
+  const batches = [...(item.batches || []), { id: uid(), qty: q, expiry: expiry || "", addedOn: date || todayStr() }];
+  return { ...item, batches, stock: (item.stock || 0) + q, updatedAt: date || todayStr() };
+}
+
+function removeStock(item, qty, date) {
+  let need = +qty || 0;
+  const out = [];
+  [...(item.batches || [])].sort(batchSort).forEach((b) => {
+    if (need <= 0) return out.push(b);
+    if (b.qty <= need) { need -= b.qty; } // consume whole batch
+    else { out.push({ ...b, qty: b.qty - need }); need = 0; }
+  });
+  return { ...item, batches: out, stock: Math.max(0, (item.stock || 0) - (+qty || 0)), updatedAt: date || todayStr() };
+}
+
+// Days until the earliest batch expiry (null if no dated batches; negative = expired).
+function daysToExpiry(item) {
+  const dates = (item.batches || []).filter((b) => b.expiry).map((b) => b.expiry).sort();
+  if (!dates.length) return null;
+  return Math.round((new Date(dates[0] + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000);
+}
 
 // ---------- main app ----------
 export default function GroceryStoreManager() {
@@ -305,6 +363,7 @@ export default function GroceryStoreManager() {
   };
 
   const lowStock = items.filter((i) => i.stock <= i.lowAt);
+  const alertCount = lowStock.length + items.filter((i) => { const d = daysToExpiry(i); return d != null && d <= 30; }).length;
 
   return (
     <div className="app" style={S.app}>
@@ -322,6 +381,7 @@ export default function GroceryStoreManager() {
           ["dashboard", "⌂", "Dashboard"],
           ["billing", "₹", "Billing (POS)"],
           ["inventory", "▦", "Inventory"],
+          ["alerts", "⚠", "Alerts"],
           ["sales", "⊟", "Sales History"],
           ["finance", "∑", "Finance"],
           ["expense", "⊝", "Add Expense"],
@@ -333,6 +393,9 @@ export default function GroceryStoreManager() {
             <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
             {k === "inventory" && lowStock.length > 0 && (
               <span style={S.badge}>{lowStock.length}</span>
+            )}
+            {k === "alerts" && alertCount > 0 && (
+              <span style={S.badge}>{alertCount}</span>
             )}
           </button>
         ))}
@@ -359,15 +422,17 @@ export default function GroceryStoreManager() {
         ) : tab === "dashboard" ? (
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         ) : tab === "billing" ? (
-          <Billing items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
+          <Billing items={items} sales={sales} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "raw" ? (
           <RawData items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
           <Inventory items={items} setItems={setItems} notify={notify} log={addLog} />
+        ) : tab === "alerts" ? (
+          <Alerts items={items} goInventory={() => setTab("inventory")} />
         ) : tab === "barcode" ? (
           <BarcodeCreator items={items} setItems={setItems} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
-          <SalesHistory sales={sales} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
+          <SalesHistory sales={sales} items={items} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
         ) : tab === "finance" ? (
           <Finance sales={sales} expenses={expenses} />
         ) : tab === "expense" ? (
@@ -469,21 +534,33 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
 }
 
 // ---------- Billing / POS ----------
-function Billing({ items, setItems, setSales, notify, log }) {
+function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [q, setQ] = useState("");
-  const [cart, setCart] = useState([]); // {id, name, unit, sellPrice, buyPrice, qty}
+  const [cart, setCart] = useState([]); // {id, name, icon, unit, sellPrice, buyPrice, qty}
   const [lastSale, setLastSale] = useState(null);
   const [saleDate, setSaleDate] = useState(todayStr()); // back-date a bill if needed
+  const [pay, setPay] = useState("UPI"); // UPI | Cash | Udhari
+  const [customer, setCustomer] = useState("");
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
 
+  // Units sold per item name — used to surface best-sellers first.
+  const soldQty = useMemo(() => {
+    const m = {};
+    (sales || []).forEach((s) => (s.lines || []).forEach((l) => { m[l.name] = (m[l.name] || 0) + l.qty; }));
+    return m;
+  }, [sales]);
+
   const results = useMemo(() => {
     const s = q.trim().toLowerCase();
-    const pool = s
-      ? items.filter((i) => i.name.toLowerCase().includes(s) || (i.code || "").toLowerCase().includes(s))
-      : items;
-    return pool.slice(0, 12);
-  }, [q, items]);
+    if (s) {
+      return items
+        .filter((i) => i.name.toLowerCase().includes(s) || (i.code || "").toLowerCase().includes(s))
+        .slice(0, 12);
+    }
+    // No search: best-sellers (by units sold) first, then the rest.
+    return [...items].sort((a, b) => (soldQty[b.name] || 0) - (soldQty[a.name] || 0)).slice(0, 12);
+  }, [q, items, soldQty]);
 
   const add = (item) => {
     if (item.stock <= 0) return notify("Out of stock: " + item.name);
@@ -494,7 +571,7 @@ function Billing({ items, setItems, setSales, notify, log }) {
       const ex = cart.find((c) => c.id === item.id);
       return ex
         ? cart.map((c) => (c.id === item.id ? { ...c, qty: c.qty + 1 } : c))
-        : [...cart, { id: item.id, name: item.name, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: 1 }];
+        : [...cart, { id: item.id, name: item.name, icon: item.icon, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: 1 }];
     });
   };
   const setQty = (id, qty) => {
@@ -526,18 +603,21 @@ function Billing({ items, setItems, setSales, notify, log }) {
       time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + (backDated ? " (back-dated)" : ""),
       lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, amount: money(c.sellPrice * c.qty) })),
       total, profit,
+      payment: pay,
+      ...(pay === "Udhari" && customer.trim() ? { customer: customer.trim() } : {}),
     };
     setSales((s) => [...s, sale]);
     setItems((its) => its.map((i) => {
       const c = cart.find((x) => x.id === i.id);
-      return c ? { ...i, stock: Math.max(0, i.stock - c.qty) } : i;
+      return c ? removeStock(i, c.qty, saleDate) : i; // FIFO deplete batches by expiry
     }));
     setLastSale(sale);
-    log("sale", `Bill ${INR(total)} · ${cart.length} item(s)` + (backDated ? ` · back-dated to ${saleDate}` : ""));
+    log("sale", `Bill ${INR(total)} · ${cart.length} item(s) · ${pay}` + (pay === "Udhari" && customer.trim() ? ` (${customer.trim()})` : "") + (backDated ? ` · back-dated to ${saleDate}` : ""));
     setCart([]);
     setQ("");
+    setCustomer("");
     searchRef.current?.focus();
-    notify("Bill saved — " + INR(total));
+    notify(`Bill saved (${pay}) — ` + INR(total));
   };
 
   return (
@@ -564,7 +644,7 @@ function Billing({ items, setItems, setSales, notify, log }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {results.map((i) => (
               <button key={i.id} className="pick" onClick={() => add(i)} disabled={i.stock <= 0}>
-                <div style={{ fontWeight: 700, fontSize: 13.5 }}>{i.name}</div>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
                   <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
                   <span style={{ color: i.stock <= i.lowAt ? "#C44536" : "#789" }}>{i.stock <= 0 ? "Out of stock" : i.stock + " left"}</span>
@@ -589,7 +669,7 @@ function Billing({ items, setItems, setSales, notify, log }) {
               {cart.map((c) => (
                 <div key={c.id} style={S.rcptLine}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</div>
+                    <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ marginRight: 4 }}>{c.icon || "📦"}</span>{c.name}</div>
                     <div style={{ fontSize: 11.5, color: "#777" }}>{INR(c.sellPrice)} × {c.qty} {c.unit}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -607,8 +687,19 @@ function Billing({ items, setItems, setSales, notify, log }) {
               <div style={{ fontSize: 12, color: "#1B5E43", textAlign: "right", marginTop: 2 }}>
                 Profit on this bill: {INR(profit)}
               </div>
-              <button className="btn primary big" onClick={completeSale} style={{ marginTop: 14, width: "100%" }}>
-                Complete sale · {INR(total)}
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#6B7E74", textTransform: "uppercase", letterSpacing: ".05em", margin: "12px 0 4px" }}>Payment</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {["UPI", "Cash", "Udhari"].map((p) => (
+                  <button key={p} className={"btn small " + (pay === p ? "primary" : "")} style={{ flex: 1 }} onClick={() => setPay(p)}>
+                    {p === "UPI" ? "UPI" : p === "Cash" ? "Cash" : "Udhari"}
+                  </button>
+                ))}
+              </div>
+              {pay === "Udhari" && (
+                <input className="input" style={{ marginTop: 8 }} placeholder="Customer name (paying later)" value={customer} onChange={(e) => setCustomer(e.target.value)} />
+              )}
+              <button className="btn primary big" onClick={completeSale} style={{ marginTop: 12, width: "100%" }}>
+                Complete sale · {INR(total)} · {pay}
               </button>
               <button className="btn ghost" onClick={() => setCart([])} style={{ marginTop: 8, width: "100%" }}>
                 Clear bill
@@ -622,13 +713,14 @@ function Billing({ items, setItems, setSales, notify, log }) {
 }
 
 // ---------- Inventory ----------
-const blankItem = { name: "", code: "", category: CATEGORIES[0], unit: "pc", buyPrice: "", sellPrice: "", stock: "", lowAt: 5 };
+const blankItem = { name: "", code: "", category: CATEGORIES[0], unit: "pc", icon: "", buyPrice: "", sellPrice: "", mrp: "", stock: "", lowAt: 5, expiry: "" };
 
 function Inventory({ items, setItems, notify, log }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("All");
   const [form, setForm] = useState(null); // null | {…item, id?}
-  const [restock, setRestock] = useState(null); // {id, qty}
+  const [restock, setRestock] = useState(null); // {id, name, qty, expiry}
+  const [open, setOpen] = useState(null); // expanded item id (batch detail)
 
   const filtered = items.filter((i) => {
     const term = q.trim().toLowerCase();
@@ -641,17 +733,23 @@ function Inventory({ items, setItems, notify, log }) {
   const save = () => {
     const f = form;
     if (!f.name.trim()) return notify("Item name is required");
-    const buy = +f.buyPrice, sell = +f.sellPrice, stock = +f.stock || 0, lowAt = +f.lowAt || 0;
+    const buy = +f.buyPrice, sell = +f.sellPrice, lowAt = +f.lowAt || 0;
     if (!(sell > 0)) return notify("Selling price must be more than 0");
-    if (buy < 0 || sell < 0 || stock < 0) return notify("Prices and stock cannot be negative");
-    const rec = { ...f, name: f.name.trim(), code: (f.code || "").trim(), buyPrice: buy || 0, sellPrice: sell, stock, lowAt };
+    if (buy < 0 || sell < 0) return notify("Prices cannot be negative");
+    const base = {
+      name: f.name.trim(), code: (f.code || "").trim(), category: f.category, unit: f.unit,
+      icon: (f.icon || "").trim() || iconFor(f.category), buyPrice: buy || 0, sellPrice: sell,
+      mrp: +f.mrp || sell, lowAt,
+    };
     if (f.id) {
-      setItems(items.map((i) => (i.id === f.id ? { ...rec, updatedAt: todayStr() } : i)));
-      log("inventory", `Edited item “${rec.name}” (buy ${INR(rec.buyPrice)}, sell ${INR(rec.sellPrice)}, stock ${rec.stock})`);
+      setItems(items.map((i) => (i.id === f.id ? { ...i, ...base, updatedAt: todayStr() } : i)));
+      log("inventory", `Edited item “${base.name}”`);
       notify("Item updated");
     } else {
-      setItems([...items, { ...rec, id: uid(), createdAt: todayStr() }]);
-      log("inventory", `Added item “${rec.name}” · ${rec.stock} ${rec.unit} @ ${INR(rec.sellPrice)}`);
+      const stock = +f.stock || 0;
+      const batches = stock > 0 ? [{ id: uid(), qty: stock, expiry: f.expiry || "", addedOn: todayStr() }] : [];
+      setItems([...items, { ...base, id: uid(), stock, batches, createdAt: todayStr() }]);
+      log("inventory", `Added item “${base.name}” · ${stock} ${base.unit} @ ${INR(sell)}` + (f.expiry ? ` (exp ${f.expiry})` : ""));
       notify("Item added to inventory");
     }
     setForm(null);
@@ -660,15 +758,23 @@ function Inventory({ items, setItems, notify, log }) {
   const doRestock = () => {
     const qty = +restock.qty;
     if (!(qty > 0)) return notify("Enter quantity to add");
-    setItems(items.map((i) => (i.id === restock.id ? { ...i, stock: i.stock + qty, updatedAt: todayStr() } : i)));
-    log("inventory", `Restocked “${restock.name}” +${qty}`);
+    setItems(items.map((i) => (i.id === restock.id ? addBatch(i, qty, restock.expiry, todayStr()) : i)));
+    log("inventory", `Restocked “${restock.name}” +${qty}` + (restock.expiry ? ` (exp ${restock.expiry})` : ""));
     setRestock(null);
     notify("Stock added");
   };
 
+  const del = (i) => {
+    if (!confirm("Delete " + i.name + "?")) return;
+    setItems(items.filter((x) => x.id !== i.id));
+    log("inventory", `Deleted item “${i.name}”`);
+  };
+
+  const stop = (e) => e.stopPropagation();
+
   return (
     <div>
-      <Header title="Inventory" sub={items.length + " items in store"}>
+      <Header title="Inventory" sub={items.length + " items · click a row to see batches & expiry"}>
         <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
       </Header>
 
@@ -686,24 +792,61 @@ function Inventory({ items, setItems, notify, log }) {
             <tr><th>Item</th><th>Category</th><th>Added</th><th style={{ textAlign: "right" }}>Buy</th><th style={{ textAlign: "right" }}>Sell</th><th style={{ textAlign: "right" }}>Margin</th><th style={{ textAlign: "right" }}>Stock</th><th></th></tr>
           </thead>
           <tbody>
-            {filtered.map((i) => (
-              <tr key={i.id}>
-                <td style={{ fontWeight: 600 }}>{i.name}{i.code ? <span style={{ color: "#9AA", fontWeight: 400, fontSize: 11 }}> · {i.code}</span> : null}</td>
-                <td style={{ color: "#677" }}>{i.category}</td>
-                <td style={{ color: "#789", whiteSpace: "nowrap", fontSize: 12.5 }}>{i.createdAt || "—"}{i.updatedAt && i.updatedAt !== i.createdAt ? <span title={"edited " + i.updatedAt}> ✎</span> : null}</td>
-                <td style={{ textAlign: "right" }}>{INR(i.buyPrice)}</td>
-                <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(i.sellPrice)}</td>
-                <td style={{ textAlign: "right", color: "#1B5E43" }}>{i.buyPrice ? Math.round(((i.sellPrice - i.buyPrice) / i.buyPrice) * 100) + "%" : "—"}</td>
-                <td style={{ textAlign: "right", fontWeight: 700, color: i.stock <= i.lowAt ? "#C44536" : "#223" }}>
-                  {i.stock} {i.unit}{i.stock <= i.lowAt && " ⚠"}
-                </td>
-                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                  <button className="btn small" onClick={() => setRestock({ id: i.id, name: i.name, qty: "" })}>Restock</button>{" "}
-                  <button className="btn small ghost" onClick={() => setForm({ ...i })}>Edit</button>{" "}
-                  <button className="btn small danger" aria-label={"Delete " + i.name} onClick={() => { if (confirm("Delete " + i.name + "?")) { setItems(items.filter((x) => x.id !== i.id)); log("inventory", `Deleted item “${i.name}”`); } }}>✕</button>
-                </td>
-              </tr>
-            ))}
+            {filtered.map((i) => {
+              const dte = daysToExpiry(i);
+              const isOpen = open === i.id;
+              return (
+                <Fragment key={i.id}>
+                  <tr style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : i.id)}>
+                    <td style={{ fontWeight: 600 }}>
+                      <span style={{ marginRight: 6 }}>{i.icon || "📦"}</span>{i.name}
+                      {i.code ? <span style={{ color: "#9AA", fontWeight: 400, fontSize: 11 }}> · {i.code}</span> : null}
+                      <span style={{ color: "#AAB", marginLeft: 6 }}>{isOpen ? "▾" : "▸"}</span>
+                    </td>
+                    <td style={{ color: "#677" }}>{i.category}</td>
+                    <td style={{ color: "#789", whiteSpace: "nowrap", fontSize: 12.5 }}>{i.createdAt || "—"}{i.updatedAt && i.updatedAt !== i.createdAt ? <span title={"edited " + i.updatedAt}> ✎</span> : null}</td>
+                    <td style={{ textAlign: "right" }}>{INR(i.buyPrice)}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(i.sellPrice)}</td>
+                    <td style={{ textAlign: "right", color: "#1B5E43" }}>{i.buyPrice ? Math.round(((i.sellPrice - i.buyPrice) / i.buyPrice) * 100) + "%" : "—"}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700, color: i.stock <= i.lowAt ? "#C44536" : "#223" }}>
+                      {i.stock} {i.unit}{i.stock <= i.lowAt && " ⚠"}
+                      {dte != null && dte <= 30 && <div style={{ fontSize: 10.5, fontWeight: 600, color: dte < 0 ? "#C44536" : "#B0762A" }}>{dte < 0 ? "expired" : "exp in " + dte + "d"}</div>}
+                    </td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button className="btn small" onClick={(e) => { stop(e); setRestock({ id: i.id, name: i.name, qty: "", expiry: "" }); }}>Restock</button>{" "}
+                      <button className="btn small ghost" onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", expiry: "" }); }}>Edit</button>{" "}
+                      <button className="btn small danger" aria-label={"Delete " + i.name} onClick={(e) => { stop(e); del(i); }}>✕</button>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={8} style={{ background: "#F7FAF7" }}>
+                        {i.batches && i.batches.length ? (
+                          <table className="tbl" style={{ margin: 0 }}>
+                            <thead><tr><th style={{ width: 120 }}>Batch qty</th><th style={{ width: 160 }}>Expiry</th><th>Date added</th></tr></thead>
+                            <tbody>
+                              {[...i.batches].sort(batchSort).map((b) => {
+                                const bd = b.expiry ? Math.round((new Date(b.expiry + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000) : null;
+                                const col = bd == null ? "#677" : bd < 0 ? "#C44536" : bd <= 30 ? "#B0762A" : "#677";
+                                return (
+                                  <tr key={b.id}>
+                                    <td style={{ fontWeight: 700 }}>{b.qty} {i.unit}</td>
+                                    <td style={{ color: col, fontWeight: bd != null && bd <= 30 ? 700 : 400 }}>{b.expiry || "— no expiry —"}{bd != null && bd <= 30 ? (bd < 0 ? " (expired)" : ` (${bd}d left)`) : ""}</td>
+                                    <td style={{ color: "#677" }}>{b.addedOn}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        ) : (
+                          <div style={{ padding: "8px 4px", color: "#8A9", fontSize: 13 }}>No batch / expiry detail yet — add stock via <b>Restock</b> to record expiry dates.</div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
             {filtered.length === 0 && <tr><td colSpan={8}><Empty text="No items found." /></td></tr>}
           </tbody>
         </table>
@@ -724,11 +867,15 @@ function Inventory({ items, setItems, notify, log }) {
                 {UNITS.map((u) => <option key={u}>{u}</option>)}
               </select>
             </Field>
+            <Field label="Icon (emoji)"><input className="input" value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} placeholder={iconFor(form.category)} /></Field>
+            <Field label="MRP (₹)"><input className="input" type="number" min="0" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} /></Field>
             <Field label="Buying price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.buyPrice} onChange={(e) => setForm({ ...form, buyPrice: e.target.value })} /></Field>
             <Field label="Selling price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.sellPrice} onChange={(e) => setForm({ ...form, sellPrice: e.target.value })} /></Field>
-            <Field label="Current stock"><input className="input" type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>
+            {!form.id && <Field label="Opening stock"><input className="input" type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>}
+            {!form.id && <Field label="Expiry (optional)"><input className="input" type="date" value={form.expiry} onChange={(e) => setForm({ ...form, expiry: e.target.value })} /></Field>}
             <Field label="Alert when stock below"><input className="input" type="number" min="0" value={form.lowAt} onChange={(e) => setForm({ ...form, lowAt: e.target.value })} /></Field>
           </div>
+          {form.id && <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>To add stock with an expiry date, close this and use <b>Restock</b>.</div>}
           <button className="btn primary big" style={{ width: "100%", marginTop: 14 }} onClick={save}>
             {form.id ? "Save changes" : "Add item"}
           </button>
@@ -739,6 +886,9 @@ function Inventory({ items, setItems, notify, log }) {
         <Modal title={"Restock — " + restock.name} onClose={() => setRestock(null)}>
           <Field label="Quantity to add">
             <input className="input" type="number" min="0" autoFocus value={restock.qty} onChange={(e) => setRestock({ ...restock, qty: e.target.value })} />
+          </Field>
+          <Field label="Expiry date (optional)">
+            <input className="input" type="date" value={restock.expiry} onChange={(e) => setRestock({ ...restock, expiry: e.target.value })} />
           </Field>
           <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={doRestock}>Add stock</button>
         </Modal>
@@ -1048,11 +1198,15 @@ function RawData({ items, setItems, setSales, notify, log }) {
       if (!a) return i;
       agg.delete(i.name.toLowerCase());
       updated++;
-      return { ...i, stock: i.stock + a.qty, buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
+      return { ...addBatch(i, a.qty, "", todayStr()), buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
     });
     agg.forEach((a) => {
       const sell = a.sell || (a.buy ? Math.round(a.buy * 1.15) : 0);
-      next.push({ id: uid(), name: a.name, code: "", category: "Other", unit: a.unit, buyPrice: a.buy, sellPrice: sell, stock: a.qty, lowAt: 5 });
+      next.push({
+        id: uid(), name: a.name, code: "", category: "Other", unit: a.unit, icon: iconFor("Other"),
+        buyPrice: a.buy, sellPrice: sell, mrp: sell, stock: a.qty, lowAt: 5,
+        batches: a.qty > 0 ? [{ id: uid(), qty: a.qty, expiry: "", addedOn: todayStr() }] : [], createdAt: todayStr(),
+      });
       added++;
     });
     setItems(next);
@@ -1079,7 +1233,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
     }]);
     setItems((its) => its.map((i) => {
       const a = agg.get(i.name.toLowerCase());
-      return a ? { ...i, stock: Math.max(0, i.stock - a.qty) } : i;
+      return a ? removeStock(i, a.qty, todayStr()) : i;
     }));
     log("import", `Imported sale ${INR(total)} · ${lines.length} line(s) (${source || "manual"})`);
     reset();
@@ -1194,11 +1348,13 @@ function RawData({ items, setItems, setSales, notify, log }) {
 }
 
 // ---------- Sales history ----------
-function SalesHistory({ sales, setSales, setItems, notify, log }) {
+const PAY_COLORS = { UPI: "#2A6FB0", Cash: "#1B5E43", Udhari: "#C44536" };
+
+function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   const [open, setOpen] = useState(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [editing, setEditing] = useState(null); // {id, date, total}
+  const [editing, setEditing] = useState(null); // { id, date, payment, lines:[...], orig:[...] }
 
   const visible = sales.filter((s) => (!from || s.date >= from) && (!to || s.date <= to));
   const byDate = useMemo(() => {
@@ -1208,24 +1364,49 @@ function SalesHistory({ sales, setSales, setItems, notify, log }) {
   }, [visible]);
   const rangeTotal = money(visible.reduce((a, s) => a + s.total, 0));
 
-  // Deleting a bill returns its quantities to stock (matched by item name).
+  // Adjust stock by per-item-name deltas (positive = sell more → remove; negative = add back).
+  const applyDeltas = (deltas) => {
+    setItems((its) => its.map((i) => {
+      const d = deltas[i.name.toLowerCase()];
+      if (!d) return i;
+      return d > 0 ? removeStock(i, d, todayStr()) : addBatch(i, -d, "", todayStr());
+    }));
+  };
+
   const deleteSale = (s) => {
     if (!confirm(`Delete this ${INR(s.total)} bill from ${s.date}? Stock will be added back.`)) return;
-    setItems((its) => its.map((i) => {
-      const ln = s.lines.find((l) => l.name.toLowerCase() === i.name.toLowerCase());
-      return ln ? { ...i, stock: i.stock + ln.qty } : i;
-    }));
+    const deltas = {};
+    s.lines.forEach((l) => { deltas[l.name.toLowerCase()] = (deltas[l.name.toLowerCase()] || 0) - l.qty; });
+    applyDeltas(deltas);
     setSales((all) => all.filter((x) => x.id !== s.id));
     log("sale", `Deleted bill ${INR(s.total)} (${s.date}) — stock restored`);
     notify("Bill deleted, stock restored");
   };
 
-  const saveDate = () => {
-    const nd = editing.date || todayStr();
-    setSales((all) => all.map((x) => (x.id === editing.id ? { ...x, date: nd } : x)));
-    log("sale", `Re-dated bill ${INR(editing.total)} → ${nd}`);
+  const openEdit = (s) => setEditing({
+    id: s.id, date: s.date, payment: s.payment || "UPI",
+    lines: s.lines.map((l) => ({ ...l })), orig: s.lines.map((l) => ({ ...l })),
+  });
+  const editLine = (idx, qty) => setEditing((e) => ({ ...e, lines: e.lines.map((l, i) => (i === idx ? { ...l, qty: Math.max(0, qty || 0) } : l)) }));
+  const removeLine = (idx) => setEditing((e) => ({ ...e, lines: e.lines.filter((_, i) => i !== idx) }));
+  const editTotal = editing ? money(editing.lines.reduce((a, l) => a + l.price * l.qty, 0)) : 0;
+
+  const saveEdit = () => {
+    const newLines = editing.lines.filter((l) => l.qty > 0).map((l) => ({ ...l, amount: money(l.price * l.qty) }));
+    if (newLines.length === 0) return notify("A bill needs at least one line — use Delete instead");
+    const total = money(newLines.reduce((a, l) => a + l.amount, 0));
+    const buyOf = (name) => items.find((i) => i.name.toLowerCase() === name.toLowerCase())?.buyPrice || 0;
+    const profit = money(newLines.reduce((a, l) => a + (l.price - buyOf(l.name)) * l.qty, 0));
+    const oldQ = {}, newQ = {};
+    editing.orig.forEach((l) => { const k = l.name.toLowerCase(); oldQ[k] = (oldQ[k] || 0) + l.qty; });
+    newLines.forEach((l) => { const k = l.name.toLowerCase(); newQ[k] = (newQ[k] || 0) + l.qty; });
+    const deltas = {};
+    [...new Set([...Object.keys(oldQ), ...Object.keys(newQ)])].forEach((k) => { const d = (newQ[k] || 0) - (oldQ[k] || 0); if (d) deltas[k] = d; });
+    applyDeltas(deltas);
+    setSales((all) => all.map((x) => (x.id === editing.id ? { ...x, date: editing.date || x.date, payment: editing.payment, lines: newLines, total, profit } : x)));
+    log("sale", `Edited bill → ${INR(total)} · ${newLines.length} line(s) · ${editing.payment}`);
     setEditing(null);
-    notify("Bill date updated");
+    notify("Bill updated");
   };
 
   return (
@@ -1249,7 +1430,10 @@ function SalesHistory({ sales, setSales, setItems, notify, log }) {
           {list.map((s) => (
             <div key={s.id}>
               <div style={{ ...S.row, cursor: "pointer" }} onClick={() => setOpen(open === s.id ? null : s.id)}>
-                <span>{s.time} · {s.lines.length} item{s.lines.length > 1 ? "s" : ""}</span>
+                <span>
+                  {s.time} · {s.lines.length} item{s.lines.length > 1 ? "s" : ""}
+                  {s.payment && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: PAY_COLORS[s.payment] || "#789", border: `1px solid ${PAY_COLORS[s.payment] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{s.payment}{s.customer ? " · " + s.customer : ""}</span>}
+                </span>
                 <span><b>{INR(s.total)}</b> <span style={{ color: "#1B5E43", fontSize: 12 }}>(+{INR(s.profit)})</span> {open === s.id ? "▾" : "▸"}</span>
               </div>
               {open === s.id && (
@@ -1261,7 +1445,7 @@ function SalesHistory({ sales, setSales, setItems, notify, log }) {
                   ))}
                   <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                     <button className="btn small" onClick={() => printReceipt(s)}>🖨 Print</button>
-                    <button className="btn small ghost" onClick={() => setEditing({ id: s.id, date: s.date, total: s.total })}>✎ Change date</button>
+                    <button className="btn small ghost" onClick={() => openEdit(s)}>✎ Edit bill</button>
                     <button className="btn small danger" onClick={() => deleteSale(s)}>🗑 Delete</button>
                   </div>
                 </div>
@@ -1272,13 +1456,118 @@ function SalesHistory({ sales, setSales, setItems, notify, log }) {
       ))}
 
       {editing && (
-        <Modal title={"Change bill date — " + INR(editing.total)} onClose={() => setEditing(null)}>
-          <Field label="New date">
-            <input type="date" className="input" autoFocus max={todayStr()} value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} />
-          </Field>
-          <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={saveDate}>Save date</button>
+        <Modal title="Edit bill" onClose={() => setEditing(null)}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Date"><input type="date" className="input" max={todayStr()} value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} /></Field>
+            <Field label="Payment">
+              <select className="input" value={editing.payment} onChange={(e) => setEditing({ ...editing, payment: e.target.value })}>
+                {["UPI", "Cash", "Udhari"].map((p) => <option key={p}>{p}</option>)}
+              </select>
+            </Field>
+          </div>
+          <table className="tbl">
+            <thead><tr><th>Item</th><th style={{ width: 70 }}>Qty</th><th style={{ textAlign: "right" }}>Amount</th><th style={{ width: 30 }}></th></tr></thead>
+            <tbody>
+              {editing.lines.map((l, idx) => (
+                <tr key={idx}>
+                  <td>{l.name}<div style={{ fontSize: 11, color: "#9AA" }}>{INR(l.price)}/{l.unit}</div></td>
+                  <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" value={l.qty} onChange={(e) => editLine(idx, +e.target.value)} /></td>
+                  <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(money(l.price * l.qty))}</td>
+                  <td><button className="btn small danger" aria-label="Remove line" onClick={() => removeLine(idx)}>✕</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 10 }}><span>New total</span><span>{INR(editTotal)}</span></div>
+          <div style={{ fontSize: 11.5, color: "#6B7E74", marginTop: 4 }}>Stock adjusts automatically for any quantity change.</div>
+          <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={saveEdit}>Save changes</button>
         </Modal>
       )}
+    </div>
+  );
+}
+
+// ---------- Alerts ----------
+function Alerts({ items, goInventory }) {
+  const [view, setView] = useState("low"); // low | out | expiring | expired
+  const [cat, setCat] = useState("All");
+  const byCat = (i) => cat === "All" || i.category === cat;
+
+  const low = items.filter((i) => byCat(i) && i.stock <= i.lowAt).sort((a, b) => a.stock - b.stock);
+  const out = low.filter((i) => i.stock <= 0);
+
+  const expRows = [];
+  items.filter(byCat).forEach((i) => (i.batches || []).forEach((b) => {
+    if (!b.expiry) return;
+    const d = Math.round((new Date(b.expiry + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000);
+    expRows.push({ item: i, b, d });
+  }));
+  const expiring = expRows.filter((r) => r.d >= 0 && r.d <= 30).sort((a, b) => a.d - b.d);
+  const expired = expRows.filter((r) => r.d < 0).sort((a, b) => a.d - b.d);
+
+  const tabs = [["low", "Low stock", low.length], ["out", "Out of stock", out.length], ["expiring", "Expiring ≤30d", expiring.length], ["expired", "Expired", expired.length]];
+  const isStockView = view === "low" || view === "out";
+  const stockList = view === "out" ? out : low;
+  const expList = view === "expired" ? expired : expiring;
+
+  return (
+    <div>
+      <Header title="Alerts" sub="Items running low (lowest stock first) and batches nearing or past expiry">
+        <button className="btn ghost small" onClick={goInventory}>Go to inventory</button>
+      </Header>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        {tabs.map(([k, lbl, n]) => (
+          <button key={k} className={"btn small " + (view === k ? "primary" : "")} onClick={() => setView(k)}>
+            {lbl} <b>({n})</b>
+          </button>
+        ))}
+        <select className="input" style={{ width: "auto", marginLeft: "auto" }} value={cat} onChange={(e) => setCat(e.target.value)}>
+          <option>All</option>
+          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+        </select>
+      </div>
+
+      <section style={S.panel}>
+        {isStockView ? (
+          stockList.length === 0 ? (
+            <Empty text="Nothing here — stock looks healthy." />
+          ) : (
+            <table className="tbl">
+              <thead><tr><th>Item</th><th>Category</th><th style={{ textAlign: "right" }}>Stock</th><th style={{ textAlign: "right" }}>Alert below</th></tr></thead>
+              <tbody>
+                {stockList.map((i) => (
+                  <tr key={i.id}>
+                    <td style={{ fontWeight: 600 }}><span style={{ marginRight: 6 }}>{i.icon || "📦"}</span>{i.name}</td>
+                    <td style={{ color: "#677" }}>{i.category}</td>
+                    <td style={{ textAlign: "right", fontWeight: 800, color: i.stock <= 0 ? "#C44536" : "#B0762A" }}>{i.stock} {i.unit}</td>
+                    <td style={{ textAlign: "right", color: "#789" }}>{i.lowAt}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        ) : (
+          expList.length === 0 ? (
+            <Empty text="No batches in this window." />
+          ) : (
+            <table className="tbl">
+              <thead><tr><th>Item</th><th>Category</th><th style={{ textAlign: "right" }}>Batch qty</th><th>Expiry</th><th style={{ textAlign: "right" }}>Status</th></tr></thead>
+              <tbody>
+                {expList.map((r, idx) => (
+                  <tr key={idx}>
+                    <td style={{ fontWeight: 600 }}><span style={{ marginRight: 6 }}>{r.item.icon || "📦"}</span>{r.item.name}</td>
+                    <td style={{ color: "#677" }}>{r.item.category}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700 }}>{r.b.qty} {r.item.unit}</td>
+                    <td>{r.b.expiry}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700, color: r.d < 0 ? "#C44536" : "#B0762A" }}>{r.d < 0 ? `${-r.d}d ago` : `in ${r.d}d`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+      </section>
     </div>
   );
 }

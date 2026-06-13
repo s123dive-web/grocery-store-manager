@@ -29,13 +29,17 @@ There is no server and no cross-device sync.
 
 - **Dashboard** — pick any day to view its sales/profit; 14-day sales trend chart;
   low-stock and recent-bills panels.
-- **Billing (POS)** — search or scan a barcode (Enter adds top match), live cart,
-  back-date a bill, complete sale, and print the receipt.
+- **Billing (POS)** — search or scan a barcode (Enter adds top match); best-sellers show
+  first; item icons; choose payment **UPI (default) / Cash / Udhari** (credit, with
+  customer name); back-date a bill; complete sale and print the receipt.
 - **Data Import** — import a **txt / csv / tsv / xls / xlsx / pdf / json** file *or paste
   raw text*; columns are auto-detected; review/add/edit/delete rows; then submit as a
   **sale** or **add to inventory**. (PDF text extraction is best-effort.)
-- **Inventory** — add/edit/restock items, optional barcode/code, "Added on" dates,
-  low-stock alerts.
+- **Inventory** — add/edit/restock items with **expiry dates**; each item is an
+  expandable row showing its **batches** (quantity, expiry, date added); icons,
+  optional barcode/code, MRP, low-stock alerts. Stock depletes FIFO by earliest expiry.
+- **Alerts** — explicit view of low-stock items (lowest quantity first) plus batches
+  expiring within 30 days or already expired; filter by status and category.
 - **Barcode Creator** — generate a scannable barcode (Code 128 or EAN-13) with product
   name, MRP, packaged & expiry dates; live preview; print a tiled sheet of small
   shelf labels at true mm size; optionally save the code back to the inventory item so
@@ -55,6 +59,14 @@ There is no server and no cross-device sync.
 - **xlsx (SheetJS)** — parsing csv/xls/xlsx imports and building/reading XLSX backups.
 - **pdfjs-dist** — extracting text from PDF imports (lazy-loaded into its own chunk).
 - **jsbarcode** — rendering Code 128 / EAN-13 barcodes for shelf labels.
+
+## Data reset
+
+The storage key was bumped to `psm-data-v1` for the relaunch, so on first load the app
+seeds a fresh catalogue (all items at **0 stock**, including new Stationery and
+Sports & Toys items like cricket bats, balls, safety guard, supporters) and **no prior
+sales / expenses / logs**. Restock items to begin selling. Old data under the previous
+key is ignored (and can be cleared from the browser if desired).
 
 ## Notes
 
