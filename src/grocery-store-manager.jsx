@@ -321,12 +321,12 @@ export default function GroceryStoreManager() {
         {[
           ["dashboard", "⌂", "Dashboard"],
           ["billing", "₹", "Billing (POS)"],
-          ["raw", "⇪", "Data Import"],
           ["inventory", "▦", "Inventory"],
-          ["barcode", "▥", "Barcode Creator"],
           ["sales", "⊟", "Sales History"],
           ["finance", "∑", "Finance"],
           ["expense", "⊝", "Add Expense"],
+          ["raw", "⇪", "Data Import"],
+          ["barcode", "▥", "Barcode Creator"],
           ["logs", "❑", "Activity Log"],
         ].map(([k, ic, label]) => (
           <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
@@ -748,6 +748,12 @@ function Inventory({ items, setItems, notify, log }) {
 }
 
 // ---------- Barcode Creator ----------
+// Format a YYYY-MM-DD date as MM/YY for compact shelf labels.
+const mmYY = (ds) => {
+  if (!ds) return "";
+  const [y, m] = ds.split("-");
+  return m && y ? `${m}/${y.slice(2)}` : "";
+};
 const LABEL_SIZES = {
   "38x25": { w: 38, h: 25, label: "38 × 25 mm (small)" },
   "50x30": { w: 50, h: 30, label: "50 × 30 mm (medium)" },
@@ -781,6 +787,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
   const [code, setCode] = useState(genCode("CODE128"));
   const [format, setFormat] = useState("CODE128");
   const [mrp, setMrp] = useState("");
+  const [sell, setSell] = useState("");
   const [pkd, setPkd] = useState(todayStr());
   const [exp, setExp] = useState("");
   const [qty, setQty] = useState(12);
@@ -806,6 +813,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
     if (!it) return;
     setName(it.name);
     if (it.sellPrice) setMrp(it.sellPrice);
+    setSell(it.sellPrice || "");
     setCode(it.code ? it.code : genCode(format));
   };
 
@@ -824,12 +832,14 @@ function BarcodeCreator({ items, setItems, notify, log }) {
     catch { return notify("Invalid barcode value for " + format); }
     const sz = LABEL_SIZES[size];
     const n = Math.max(1, Math.min(300, +qty || 1));
+    const priceLine = [mrp ? "MRP ₹" + escapeHtml(String(mrp)) : "", sell ? "Sell ₹" + escapeHtml(String(sell)) : ""].filter(Boolean).join("&nbsp;&nbsp;");
+    const dateLine = [pkd ? "PKD " + mmYY(pkd) : "", exp ? "EXP " + mmYY(exp) : ""].filter(Boolean).join("&nbsp;&nbsp;");
     const one = `<div class="lbl">
       <div class="store">${escapeHtml(STORE.name)}</div>
       <div class="pname">${escapeHtml(name || "")}</div>
       <img src="${url}" />
-      ${mrp ? `<div class="mrp">MRP ₹${escapeHtml(String(mrp))}</div>` : ""}
-      <div class="dates">${pkd ? "PKD " + escapeHtml(pkd) : ""}${exp ? "  EXP " + escapeHtml(exp) : ""}</div>
+      ${priceLine ? `<div class="price">${priceLine}</div>` : ""}
+      <div class="dates">${dateLine}</div>
     </div>`;
     const w = window.open("", "_blank");
     if (!w) return notify("Allow pop-ups to print labels");
@@ -844,7 +854,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
         .store { font-size:6pt; font-weight:bold; color:#10331F; line-height:1; }
         .pname { font-size:7.5pt; font-weight:bold; line-height:1.05; max-height:2.3em; overflow:hidden; }
         .lbl img { max-width:100%; height:auto; flex:0 0 auto; }
-        .mrp { font-size:8.5pt; font-weight:bold; line-height:1; }
+        .price { font-size:8pt; font-weight:bold; line-height:1; }
         .dates { font-size:5.5pt; color:#333; line-height:1; }
         @media print { .lbl { border-color:#e5e5e5; } }
       </style></head><body>
@@ -891,6 +901,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
               </select>
             </Field>
             <Field label="MRP (₹)"><input className="input" type="number" min="0" step="0.01" value={mrp} onChange={(e) => setMrp(e.target.value)} /></Field>
+            <Field label="Selling price (₹)"><input className="input" type="number" min="0" step="0.01" value={sell} onChange={(e) => setSell(e.target.value)} /></Field>
             <Field label="Packaged date"><input className="input" type="date" max={todayStr()} value={pkd} onChange={(e) => setPkd(e.target.value)} /></Field>
             <Field label="Expiry date"><input className="input" type="date" value={exp} onChange={(e) => setExp(e.target.value)} /></Field>
           </div>
@@ -924,8 +935,12 @@ function BarcodeCreator({ items, setItems, notify, log }) {
               <div style={{ fontSize: 10, fontWeight: 800, color: "#10331F" }}>{STORE.name}</div>
               <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.1 }}>{name || <span style={{ color: "#AAB" }}>Product name</span>}</div>
               <svg ref={svgRef} style={{ maxWidth: "100%" }} />
-              {mrp ? <div style={{ fontSize: 13, fontWeight: 800 }}>MRP ₹{mrp}</div> : null}
-              <div style={{ fontSize: 9, color: "#445" }}>{pkd ? "PKD " + pkd : ""}{exp ? "  EXP " + exp : ""}</div>
+              {(mrp || sell) ? (
+                <div style={{ fontSize: 12, fontWeight: 800 }}>
+                  {mrp ? "MRP ₹" + mrp : ""}{mrp && sell ? " · " : ""}{sell ? "Sell ₹" + sell : ""}
+                </div>
+              ) : null}
+              <div style={{ fontSize: 9, color: "#445" }}>{pkd ? "PKD " + mmYY(pkd) : ""}{exp ? "  EXP " + mmYY(exp) : ""}</div>
             </div>
           </div>
           <button className="btn primary big" style={{ width: "100%" }} disabled={!code.trim() || !!err} onClick={printLabels}>
