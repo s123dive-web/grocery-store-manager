@@ -396,7 +396,6 @@ function daysToExpiry(item) {
 const AUTH_KEY = "psm-cred";
 const SESSION_KEY = "psm-session";
 const DEFAULT_USER = "prakash";
-const DEFAULT_PASS = "prakash16";
 
 const randSalt = () => {
   const a = new Uint8Array(16);
@@ -419,10 +418,10 @@ function getCred() {
   try { const c = JSON.parse(localStorage.getItem(AUTH_KEY)); if (c && c.user && c.hash) return c; } catch { /* ignore */ }
   return null;
 }
-async function ensureCred() {
-  if (getCred()) return;
+async function createCred(user, pwd) {
   const salt = randSalt();
-  localStorage.setItem(AUTH_KEY, JSON.stringify({ user: DEFAULT_USER, salt, hash: await hashPwd(salt, DEFAULT_PASS) }));
+  const u = (user || DEFAULT_USER).trim() || DEFAULT_USER;
+  localStorage.setItem(AUTH_KEY, JSON.stringify({ user: u, salt, hash: await hashPwd(salt, pwd) }));
 }
 async function verifyLogin(user, pwd) {
   const c = getCred();
@@ -437,20 +436,28 @@ async function setPassword(newPwd) {
 }
 
 function Login({ onAuth }) {
+  const [setup] = useState(() => !getCred()); // no credential yet → first-run setup
   const [user, setUser] = useState(DEFAULT_USER);
   const [pwd, setPwd] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [tries, setTries] = useState(0);
   const [lockUntil, setLockUntil] = useState(0);
 
-  useEffect(() => { ensureCred(); }, []);
-
   const submit = async (e) => {
     e?.preventDefault();
-    if (Date.now() < lockUntil) return;
     setBusy(true);
-    await ensureCred();
+    if (setup) {
+      if (pwd.length < 4) { setBusy(false); return setErr("Password must be at least 4 characters."); }
+      if (pwd !== confirm) { setBusy(false); return setErr("Passwords do not match."); }
+      await createCred(user, pwd);
+      setBusy(false);
+      sessionStorage.setItem(SESSION_KEY, "1");
+      onAuth();
+      return;
+    }
+    if (Date.now() < lockUntil) { setBusy(false); return; }
     const ok = await verifyLogin(user, pwd);
     setBusy(false);
     if (ok) { sessionStorage.setItem(SESSION_KEY, "1"); onAuth(); return; }
@@ -461,7 +468,7 @@ function Login({ onAuth }) {
     else setErr("Incorrect username or password.");
   };
 
-  const locked = Date.now() < lockUntil;
+  const locked = !setup && Date.now() < lockUntil;
   return (
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#10331F", padding: 16 }}>
       <style>{CSS}</style>
@@ -473,13 +480,17 @@ function Login({ onAuth }) {
             <div style={{ fontSize: 11.5, color: "#8A9C90" }}>{STORE.address}</div>
           </div>
         </div>
-        <h2 style={{ fontSize: 16, margin: "18px 0 12px" }}>Sign in</h2>
+        <h2 style={{ fontSize: 16, margin: "18px 0 12px" }}>{setup ? "Create your password" : "Sign in"}</h2>
         <Field label="Username"><input className="input" value={user} autoComplete="username" onChange={(e) => setUser(e.target.value)} /></Field>
-        <Field label="Password"><input className="input" type="password" value={pwd} autoComplete="current-password" autoFocus onChange={(e) => setPwd(e.target.value)} /></Field>
+        <Field label={setup ? "New password" : "Password"}><input className="input" type="password" value={pwd} autoComplete={setup ? "new-password" : "current-password"} autoFocus onChange={(e) => setPwd(e.target.value)} /></Field>
+        {setup && <Field label="Confirm password"><input className="input" type="password" value={confirm} autoComplete="new-password" onChange={(e) => setConfirm(e.target.value)} /></Field>}
         {err && <div style={{ color: "#C44536", fontSize: 13, marginBottom: 8 }}>{err}</div>}
-        <button className="btn primary big" type="submit" style={{ width: "100%" }} disabled={busy || locked}>{busy ? "Checking…" : "Sign in"}</button>
+        <button className="btn primary big" type="submit" style={{ width: "100%" }} disabled={busy || locked}>{busy ? "Please wait…" : setup ? "Create & enter" : "Sign in"}</button>
         <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 14, lineHeight: 1.5 }}>
-          First-time login <b>{DEFAULT_USER}</b> / <b>{DEFAULT_PASS}</b> — change it after signing in (🔑 Password in the sidebar). This is a device-level gate, not server security.
+          {setup
+            ? "Set a password for this device. It is stored only as a salted hash in this browser — keep it safe, there is no recovery."
+            : "Forgot it? Clear this site's data in the browser to set a new one (your saved store data is separate, but back it up first)."}
+          {" "}This is a device-level gate, not server security.
         </div>
       </form>
     </div>

@@ -19,10 +19,12 @@ Other scripts: `npm run build`, `npm run preview`, `npm run lint`, `npm run form
 
 ## Login & security (read this)
 
-The app opens to a **login screen**. First-time credentials: **`prakash` / `prakash16`** —
-change the password immediately via **🔑 Password** in the sidebar. The password is stored
+The app opens to a **login screen**. On first run in a browser (no credential yet) it asks
+you to **create your own password** (username defaults to `prakash`) — nothing is shipped
+in the source. Change it later via **🔑 Password** in the sidebar. The password is stored
 only as a salted **SHA-256 hash** (Web Crypto); the session lives in `sessionStorage`
-(closing the browser signs you out), with a 5-attempt lockout.
+(closing the browser signs you out), with a 5-attempt lockout. No recovery — if forgotten,
+clear the site's browser data to set a new one (back up your store data first).
 
 > **Honest limitation:** this is a **client-side device gate**, not server-grade security.
 > Because everything runs in the browser with no backend, a determined person with access
