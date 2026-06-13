@@ -36,6 +36,10 @@ There is no server and no cross-device sync.
   **sale** or **add to inventory**. (PDF text extraction is best-effort.)
 - **Inventory** — add/edit/restock items, optional barcode/code, "Added on" dates,
   low-stock alerts.
+- **Barcode Creator** — generate a scannable barcode (Code 128 or EAN-13) with product
+  name, MRP, packaged & expiry dates; live preview; print a tiled sheet of small
+  shelf labels at true mm size; optionally save the code back to the inventory item so
+  it scans at billing.
 - **Sales History** — date-range filter; change a bill's date; delete a bill (restores
   stock); reprint receipts.
 - **Finance** — choose a period (this/last month, last 7/30 days, this year, or a custom
@@ -50,6 +54,7 @@ There is no server and no cross-device sync.
 - **recharts** — charts.
 - **xlsx (SheetJS)** — parsing csv/xls/xlsx imports and building/reading XLSX backups.
 - **pdfjs-dist** — extracting text from PDF imports (lazy-loaded into its own chunk).
+- **jsbarcode** — rendering Code 128 / EAN-13 barcodes for shelf labels.
 
 ## Notes
 
