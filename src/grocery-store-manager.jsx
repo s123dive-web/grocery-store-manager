@@ -792,8 +792,15 @@ function BarcodeCreator({ items, setItems, notify, log }) {
   const [exp, setExp] = useState("");
   const [qty, setQty] = useState(12);
   const [size, setSize] = useState("38x25");
+  const [cw, setCw] = useState(40);
+  const [ch, setCh] = useState(28);
   const [err, setErr] = useState(null);
   const svgRef = useRef(null);
+
+  // Resolve the chosen label size (preset or custom width/height in mm).
+  const sz = size === "custom"
+    ? (() => { const w = Math.max(15, +cw || 40), h = Math.max(10, +ch || 28); return { w, h, label: `${w} × ${h} mm` }; })()
+    : LABEL_SIZES[size];
 
   // Live barcode preview (re-rendered whenever the code or symbology changes).
   useEffect(() => {
@@ -830,7 +837,6 @@ function BarcodeCreator({ items, setItems, notify, log }) {
     let url;
     try { url = barcodeDataUrl(code.trim(), format); }
     catch { return notify("Invalid barcode value for " + format); }
-    const sz = LABEL_SIZES[size];
     const n = Math.max(1, Math.min(300, +qty || 1));
     const priceLine = [mrp ? "MRP ₹" + escapeHtml(String(mrp)) : "", sell ? "Sell ₹" + escapeHtml(String(sell)) : ""].filter(Boolean).join("&nbsp;&nbsp;");
     const dateLine = [pkd ? "PKD " + mmYY(pkd) : "", exp ? "EXP " + mmYY(exp) : ""].filter(Boolean).join("&nbsp;&nbsp;");
@@ -916,10 +922,17 @@ function BarcodeCreator({ items, setItems, notify, log }) {
             <Field label="Label size">
               <select className="input" value={size} onChange={(e) => setSize(e.target.value)}>
                 {Object.entries(LABEL_SIZES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                <option value="custom">Custom…</option>
               </select>
             </Field>
             <Field label="How many labels"><input className="input" type="number" min="1" max="300" value={qty} onChange={(e) => setQty(e.target.value)} /></Field>
           </div>
+          {size === "custom" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <Field label="Width (mm)"><input className="input" type="number" min="15" max="200" value={cw} onChange={(e) => setCw(e.target.value)} /></Field>
+              <Field label="Height (mm)"><input className="input" type="number" min="10" max="200" value={ch} onChange={(e) => setCh(e.target.value)} /></Field>
+            </div>
+          )}
 
           {err && <div style={{ color: "#C44536", fontSize: 13, marginTop: 4 }}>{err}</div>}
           {itemId && <button className="btn ghost" style={{ width: "100%", marginTop: 8 }} onClick={saveToItem}>Save this barcode to the inventory item</button>}
@@ -944,7 +957,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
             </div>
           </div>
           <button className="btn primary big" style={{ width: "100%" }} disabled={!code.trim() || !!err} onClick={printLabels}>
-            🖨 Print {Math.max(1, Math.min(300, +qty || 1))} label(s) · {LABEL_SIZES[size].label.split(" (")[0]}
+            🖨 Print {Math.max(1, Math.min(300, +qty || 1))} label(s) · {sz.label.split(" (")[0]}
           </button>
           <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 10, lineHeight: 1.5 }}>
             Labels print as a tiled sheet at true millimetre size with dashed cut guides — set your printer to 100% / “Actual size” (not “Fit”). Saving the barcode to an item lets the cashier scan it on the Billing screen.
