@@ -21,10 +21,12 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const escapeHtml = (s) =>
   String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-// Brand + payment assets (served from /public). Absolute origin so they also load
-// inside the print window (which is about:blank and can't resolve relative paths).
-const LOGO_SRC = "/logo.jpg";
-const PAYMENT_QR_SRC = "/payment-qr.jpg";
+// Brand + payment assets (served from /public). BASE_URL is "/" in dev and the repo
+// sub-path on GitHub Pages, so these resolve correctly in both. assetUrl() makes them
+// absolute for the print window (about:blank, which can't resolve relative paths).
+const BASE = import.meta.env.BASE_URL;
+const LOGO_SRC = BASE + "logo.jpg";
+const PAYMENT_QR_SRC = BASE + "payment-qr.jpg";
 const assetUrl = (p) => (typeof location !== "undefined" ? location.origin : "") + p;
 
 // Open a thermal-style receipt in a new window and trigger the print dialog.
