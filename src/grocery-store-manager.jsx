@@ -1,9 +1,12 @@
-import { useState, useEffect, useMemo, useRef, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, Fragment } from "react";
 import {
   ResponsiveContainer, AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
 } from "recharts";
 import JsBarcode from "jsbarcode";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "firebase/auth";
+import { ref as dbRef, onValue, set as dbSet } from "firebase/database";
+import { auth, db } from "./lib/firebase.js";
 import { parseFile, parseRawText } from "./lib/parse.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 
@@ -345,8 +348,6 @@ const SEED_ITEMS = [
   stock: 0, lowAt, batches: [], icon: iconFor(category), createdAt: todayStr(),
 }));
 
-// Bumped to wipe earlier sales/expenses/logs and reset stock to 0 for the relaunch.
-const STORAGE_KEY = "psm-data-v1";
 // Categories of activity recorded in the global Activity Log.
 const LOG_TYPES = ["sale", "inventory", "expense", "import", "backup"];
 
@@ -389,86 +390,48 @@ function daysToExpiry(item) {
   return Math.round((new Date(dates[0] + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000);
 }
 
-// ---------- authentication (client-side device gate) ----------
-// NOTE: this is a client-side gate — it stops casual access on a shared device but is
-// NOT server-grade security. The data lives in this browser and is readable by anyone
-// with device + dev-tools access. For real security, host behind a server login + HTTPS.
-const AUTH_KEY = "psm-cred";
-const SESSION_KEY = "psm-session";
-const DEFAULT_USER = "prakash";
-
-const randSalt = () => {
-  const a = new Uint8Array(16);
-  crypto.getRandomValues(a);
-  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+// ---------- authentication (Firebase email/password) ----------
+// Real server-side auth via Firebase. Data is gated by the database security rules
+// (locked to the shop owner's email), so it is genuinely private — not just a UI gate.
+const AUTH_ERRORS = {
+  "auth/invalid-credential": "Incorrect email or password.",
+  "auth/wrong-password": "Incorrect email or password.",
+  "auth/user-not-found": "No account with that email.",
+  "auth/invalid-email": "That email address looks invalid.",
+  "auth/missing-password": "Please enter your password.",
+  "auth/too-many-requests": "Too many attempts — please wait a minute and retry.",
+  "auth/network-request-failed": "Network error — check your internet connection.",
+  "auth/unauthorized-domain": "This web address isn't authorised in Firebase Auth settings.",
 };
+const authMessage = (code) => AUTH_ERRORS[code] || "Could not sign in. Please try again.";
 
-async function hashPwd(salt, pwd) {
-  const text = salt + "::" + pwd;
-  if (crypto?.subtle?.digest) {
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-  let h = 0; // fallback for non-secure contexts — still a gate, not cryptographic
-  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) >>> 0;
-  return "fb-" + h.toString(16);
-}
-
-function getCred() {
-  try { const c = JSON.parse(localStorage.getItem(AUTH_KEY)); if (c && c.user && c.hash) return c; } catch { /* ignore */ }
-  return null;
-}
-async function createCred(user, pwd) {
-  const salt = randSalt();
-  const u = (user || DEFAULT_USER).trim() || DEFAULT_USER;
-  localStorage.setItem(AUTH_KEY, JSON.stringify({ user: u, salt, hash: await hashPwd(salt, pwd) }));
-}
-async function verifyLogin(user, pwd) {
-  const c = getCred();
-  if (!c) return false;
-  if (user.trim().toLowerCase() !== c.user.toLowerCase()) return false;
-  return (await hashPwd(c.salt, pwd)) === c.hash;
-}
-async function setPassword(newPwd) {
-  const c = getCred() || { user: DEFAULT_USER };
-  const salt = randSalt();
-  localStorage.setItem(AUTH_KEY, JSON.stringify({ user: c.user, salt, hash: await hashPwd(salt, newPwd) }));
-}
-
-function Login({ onAuth }) {
-  const [setup] = useState(() => !getCred()); // no credential yet → first-run setup
-  const [user, setUser] = useState(DEFAULT_USER);
+function Login() {
+  const [email, setEmail] = useState("");
   const [pwd, setPwd] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
+  const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
-  const [tries, setTries] = useState(0);
-  const [lockUntil, setLockUntil] = useState(0);
 
   const submit = async (e) => {
     e?.preventDefault();
-    setBusy(true);
-    if (setup) {
-      if (pwd.length < 4) { setBusy(false); return setErr("Password must be at least 4 characters."); }
-      if (pwd !== confirm) { setBusy(false); return setErr("Passwords do not match."); }
-      await createCred(user, pwd);
+    setBusy(true); setErr(""); setInfo("");
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), pwd);
+      // App's auth listener swaps to the dashboard on success.
+    } catch (ex) {
+      setErr(authMessage(ex.code));
       setBusy(false);
-      sessionStorage.setItem(SESSION_KEY, "1");
-      onAuth();
-      return;
     }
-    if (Date.now() < lockUntil) { setBusy(false); return; }
-    const ok = await verifyLogin(user, pwd);
-    setBusy(false);
-    if (ok) { sessionStorage.setItem(SESSION_KEY, "1"); onAuth(); return; }
-    const t = tries + 1;
-    setTries(t);
-    setPwd("");
-    if (t >= 5) { setLockUntil(Date.now() + 30000); setErr("Too many attempts — wait 30 seconds and try again."); }
-    else setErr("Incorrect username or password.");
   };
 
-  const locked = !setup && Date.now() < lockUntil;
+  const reset = async () => {
+    if (!email.trim()) return setErr("Enter your email above first, then tap reset.");
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      setErr(""); setInfo("Password reset link sent to " + email.trim());
+    } catch (ex) { setErr(authMessage(ex.code)); }
+  };
+
   return (
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#10331F", padding: 16 }}>
       <style>{CSS}</style>
@@ -480,58 +443,35 @@ function Login({ onAuth }) {
             <div style={{ fontSize: 11.5, color: "#8A9C90" }}>{STORE.address}</div>
           </div>
         </div>
-        <h2 style={{ fontSize: 16, margin: "18px 0 12px" }}>{setup ? "Create your password" : "Sign in"}</h2>
-        <Field label="Username"><input className="input" value={user} autoComplete="username" onChange={(e) => setUser(e.target.value)} /></Field>
-        <Field label={setup ? "New password" : "Password"}><input className="input" type="password" value={pwd} autoComplete={setup ? "new-password" : "current-password"} autoFocus onChange={(e) => setPwd(e.target.value)} /></Field>
-        {setup && <Field label="Confirm password"><input className="input" type="password" value={confirm} autoComplete="new-password" onChange={(e) => setConfirm(e.target.value)} /></Field>}
+        <h2 style={{ fontSize: 16, margin: "18px 0 12px" }}>Sign in</h2>
+        <Field label="Email"><input className="input" type="email" value={email} autoComplete="username" autoFocus onChange={(e) => setEmail(e.target.value)} /></Field>
+        <Field label="Password"><input className="input" type="password" value={pwd} autoComplete="current-password" onChange={(e) => setPwd(e.target.value)} /></Field>
         {err && <div style={{ color: "#C44536", fontSize: 13, marginBottom: 8 }}>{err}</div>}
-        <button className="btn primary big" type="submit" style={{ width: "100%" }} disabled={busy || locked}>{busy ? "Please wait…" : setup ? "Create & enter" : "Sign in"}</button>
-        <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 14, lineHeight: 1.5 }}>
-          {setup
-            ? "Set a password for this device. It is stored only as a salted hash in this browser — keep it safe, there is no recovery."
-            : "Forgot it? Clear this site's data in the browser to set a new one (your saved store data is separate, but back it up first)."}
-          {" "}This is a device-level gate, not server security.
+        {info && <div style={{ color: "#1B5E43", fontSize: 13, marginBottom: 8 }}>{info}</div>}
+        <button className="btn primary big" type="submit" style={{ width: "100%" }} disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+        <button type="button" onClick={reset} style={{ display: "block", background: "none", border: "none", color: "#1B5E43", fontSize: 12, marginTop: 10, cursor: "pointer", padding: 0 }}>Forgot password? Email me a reset link</button>
+        <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 12, lineHeight: 1.5 }}>
+          Sign in with your shop account. Your data syncs live across every device that signs in.
         </div>
       </form>
     </div>
   );
 }
 
-function ChangePassword({ onClose, notify }) {
-  const [cur, setCur] = useState("");
-  const [nw, setNw] = useState("");
-  const [busy, setBusy] = useState(false);
-  const save = async () => {
-    setBusy(true);
-    const c = getCred();
-    const ok = await verifyLogin(c?.user || DEFAULT_USER, cur);
-    if (!ok) { setBusy(false); return notify("Current password is incorrect"); }
-    if (nw.length < 4) { setBusy(false); return notify("New password must be at least 4 characters"); }
-    await setPassword(nw);
-    setBusy(false);
-    notify("Password updated");
-    onClose();
-  };
-  return (
-    <Modal title="Change password" onClose={onClose}>
-      <Field label="Current password"><input className="input" type="password" autoFocus value={cur} onChange={(e) => setCur(e.target.value)} /></Field>
-      <Field label="New password"><input className="input" type="password" value={nw} onChange={(e) => setNw(e.target.value)} /></Field>
-      <button className="btn primary big" style={{ width: "100%", marginTop: 8 }} disabled={busy} onClick={save}>Update password</button>
-    </Modal>
-  );
-}
-
-// ---------- root: auth gate ----------
+// ---------- root: Firebase auth gate ----------
 export default function App() {
-  const [authed, setAuthed] = useState(() => sessionStorage.getItem(SESSION_KEY) === "1");
-  if (!authed) return <Login onAuth={() => setAuthed(true)} />;
-  return <StoreManager onLogout={() => { sessionStorage.removeItem(SESSION_KEY); setAuthed(false); }} />;
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  if (user === undefined) {
+    return <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#10331F", color: "#BCD2C4", fontFamily: "system-ui, sans-serif" }}>Loading…</div>;
+  }
+  if (!user) return <Login />;
+  return <StoreManager user={user} onLogout={() => signOut(auth)} />;
 }
 
 // ---------- main app ----------
-function StoreManager({ onLogout }) {
+function StoreManager({ user, onLogout }) {
   const [tab, setTab] = useState("dashboard");
-  const [showPwd, setShowPwd] = useState(false);
   const [items, setItems] = useState([]);
   const [sales, setSales] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -540,69 +480,98 @@ function StoreManager({ onLogout }) {
   const [toast, setToast] = useState(null);
 
   // load
+  // ---- Realtime Database sync (live across every signed-in device) ----
+  // Each slice is its own DB node so concurrent edits to different slices never clobber.
+  // A localStorage cache gives instant first paint and offline reads.
+  const CACHE_KEY = "psm-cache-v1";
+  const lastRemote = useRef({ items: null, sales: null, expenses: null, logs: null });
+  const synced = useRef({ items: false, sales: false, expenses: false, logs: false });
+
+  // 1) Instant paint from the local cache.
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await window.storage.get(STORAGE_KEY);
-        if (r && r.value) {
-          const d = JSON.parse(r.value);
-          const stored = Array.isArray(d.items) ? d.items : [];
-          // Non-destructive merge: add any new catalogue items not already present
-          // (by name) without touching existing stock, prices, or batches.
-          const have = new Set(stored.map((i) => (i.name || "").toLowerCase()));
-          const missing = SEED_ITEMS.filter((s) => !have.has(s.name.toLowerCase()));
-          setItems(missing.length ? [...stored, ...missing] : stored);
-          setSales(Array.isArray(d.sales) ? d.sales : []);
-          setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
-          setLogs(Array.isArray(d.logs) ? d.logs : []);
-        } else {
-          setItems(SEED_ITEMS);
-        }
-      } catch (e) {
-        console.error("load failed", e);
-        setItems(SEED_ITEMS);
-      }
-      setLoaded(true);
-    })();
+    try {
+      const c = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+      if (c) { setItems(c.items || []); setSales(c.sales || []); setExpenses(c.expenses || []); setLogs(c.logs || []); }
+    } catch (e) { console.error("cache read failed", e); }
+    setLoaded(true);
   }, []);
 
-  // save (debounced)
-  const saveTimer = useRef(null);
+  // 2) Subscribe to the cloud; changes from any device flow in live.
   useEffect(() => {
-    if (!loaded) return;
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await window.storage.set(STORAGE_KEY, JSON.stringify({ items, sales, expenses, logs }));
-      } catch (e) {
-        console.error("save failed", e);
-        notify("⚠ Could not save — device storage may be full. Download a backup now.");
-      }
-    }, 400);
-    return () => clearTimeout(saveTimer.current);
-  }, [items, sales, expenses, logs, loaded]);
+    const norm = (v) => (Array.isArray(v) ? v : v ? Object.values(v) : []);
+    const slices = [["items", setItems], ["sales", setSales], ["expenses", setExpenses], ["logs", setLogs]];
+    const unsubs = slices.map(([key, setter]) =>
+      onValue(
+        dbRef(db, "shop/" + key),
+        (snap) => {
+          const val = snap.val();
+          if (key === "items") {
+            if (val === null) { synced.current.items = true; setItems(SEED_ITEMS); return; } // first run anywhere → seed
+            const cloud = norm(val);
+            const have = new Set(cloud.map((i) => (i.name || "").toLowerCase()));
+            const missing = SEED_ITEMS.filter((s) => !have.has(s.name.toLowerCase()));
+            lastRemote.current.items = JSON.stringify(cloud);
+            synced.current.items = true;
+            setItems(missing.length ? [...cloud, ...missing] : cloud);
+            return;
+          }
+          const arr = norm(val);
+          lastRemote.current[key] = JSON.stringify(arr);
+          synced.current[key] = true;
+          setter(arr);
+        },
+        (err) => console.error("sync read failed", err)
+      )
+    );
+    return () => unsubs.forEach((u) => u());
+  }, []);
 
-  // Flush the latest snapshot synchronously when the page is hidden/closed, so a
-  // change made within the debounce window is never lost.
+  // 3) Push a slice to the cloud when it changes locally (after the first cloud snapshot,
+  //    and skipping values that just arrived from the cloud).
+  const pushSlice = useCallback((key, value) => {
+    if (!synced.current[key]) return; // don't overwrite the cloud before we've read it
+    const json = JSON.stringify(value);
+    if (json === lastRemote.current[key]) return; // echo of a cloud update
+    lastRemote.current[key] = json;
+    dbSet(dbRef(db, "shop/" + key), value).catch((e) => {
+      console.error("sync write failed", e);
+      notify("⚠ Couldn't sync to cloud (offline?). Saved on this device.");
+    });
+  }, []);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("items", items), 500); return () => clearTimeout(t); }, [items, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("sales", sales), 500); return () => clearTimeout(t); }, [sales, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("expenses", expenses), 500); return () => clearTimeout(t); }, [expenses, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("logs", logs), 500); return () => clearTimeout(t); }, [logs, loaded, pushSlice]);
+
+  // 4) Mirror to a local cache (instant next paint + offline reads + no data loss on close).
   const dataRef = useRef({ items, sales, expenses, logs });
   dataRef.current = { items, sales, expenses, logs };
   useEffect(() => {
     if (!loaded) return;
-    const flush = () => { try { window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)); } catch (e) { console.error("flush failed", e); } };
-    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
-    window.addEventListener("beforeunload", flush);
-    window.addEventListener("pagehide", flush);
+    const writeCache = () => { try { localStorage.setItem(CACHE_KEY, JSON.stringify(dataRef.current)); } catch (e) { console.error("cache write failed", e); } };
+    const t = setTimeout(writeCache, 400);
+    const onHide = () => { if (document.visibilityState === "hidden") writeCache(); };
+    window.addEventListener("beforeunload", writeCache);
+    window.addEventListener("pagehide", writeCache);
     document.addEventListener("visibilitychange", onHide);
     return () => {
-      window.removeEventListener("beforeunload", flush);
-      window.removeEventListener("pagehide", flush);
+      clearTimeout(t);
+      window.removeEventListener("beforeunload", writeCache);
+      window.removeEventListener("pagehide", writeCache);
       document.removeEventListener("visibilitychange", onHide);
     };
-  }, [loaded]);
+  }, [items, sales, expenses, logs, loaded]);
 
   const notify = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
+  };
+
+  const resetMyPassword = async () => {
+    if (!user?.email) return;
+    if (!confirm(`Send a password reset link to ${user.email}?`)) return;
+    try { await sendPasswordResetEmail(auth, user.email); notify("Reset link sent to " + user.email); }
+    catch (e) { console.error("reset failed", e); notify("⚠ Could not send reset email."); }
   };
 
   // Append an entry to the global activity log (newest first; capped to protect storage).
@@ -707,15 +676,13 @@ function StoreManager({ onLogout }) {
           </label>
         </div>
         <div style={{ display: "flex", gap: 6, padding: "8px 8px 4px" }}>
-          <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={() => setShowPwd(true)}>🔑 Password</button>
+          <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={resetMyPassword}>🔑 Reset</button>
           <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={onLogout}>⎋ Logout</button>
         </div>
         <div style={{ fontSize: 11, color: "#6E8A7C", padding: "6px 14px 8px" }}>
-          Saved on this device. Back up regularly.
+          {user?.email ? <>Signed in as {user.email}.<br /></> : null}Synced to cloud · back up regularly.
         </div>
       </nav>
-
-      {showPwd && <ChangePassword onClose={() => setShowPwd(false)} notify={notify} />}
 
       {/* main */}
       <main className="main" style={S.main}>
