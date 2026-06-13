@@ -39,7 +39,7 @@ function printReceipt(sale) {
     <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
     </table>
     <div class="ft">Thank you! Please visit again.</div>
-    <script>window.onload=function(){window.print()}<\/script>
+    <script>window.onload=function(){window.print()}</scr` + `ipt>
     </body></html>`
   );
   w.document.close();
@@ -332,7 +332,7 @@ export default function GroceryStoreManager() {
 }
 
 // ---------- Dashboard ----------
-function Dashboard({ items, sales, expenses, lowStock, goBilling }) {
+function Dashboard({ items, sales, lowStock, goBilling }) {
   const t = todayStr();
   const todaySales = sales.filter((s) => s.date === t);
   const rev = todaySales.reduce((a, s) => a + s.total, 0);
