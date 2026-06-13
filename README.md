@@ -17,6 +17,19 @@ npm run dev      # http://localhost:5173
 
 Other scripts: `npm run build`, `npm run preview`, `npm run lint`, `npm run format`.
 
+## Login & security (read this)
+
+The app opens to a **login screen**. First-time credentials: **`prakash` / `prakash16`** —
+change the password immediately via **🔑 Password** in the sidebar. The password is stored
+only as a salted **SHA-256 hash** (Web Crypto); the session lives in `sessionStorage`
+(closing the browser signs you out), with a 5-attempt lockout.
+
+> **Honest limitation:** this is a **client-side device gate**, not server-grade security.
+> Because everything runs in the browser with no backend, a determined person with access
+> to the device and dev-tools can read the local data. For real protection, host the app
+> behind a **server-side login over HTTPS** (and keep the data server-side). The gate here
+> stops casual/unauthorised access on a shared shop device, which is its intended purpose.
+
 ## How data is stored
 
 Data lives in your browser via `localStorage` (shimmed in [`src/main.jsx`](src/main.jsx)).
@@ -67,6 +80,15 @@ seeds a fresh catalogue (all items at **0 stock**, including new Stationery and
 Sports & Toys items like cricket bats, balls, safety guard, supporters) and **no prior
 sales / expenses / logs**. Restock items to begin selling. Old data under the previous
 key is ignored (and can be cleared from the browser if desired).
+
+## Catalogue & data safety
+
+The catalogue now includes loose staples (atta/rice/dals in 500g–1kg), dry fruits & nuts,
+cosmetics (shaving, shampoo, perfume, creams), brooms (zadu), detergents, Havmor ice
+creams, Haldiram/Bikaji/Lay's/Balaji/Chitale snacks, Cadbury chocolates, oils (1L pouches
+and Gemini 5L/15L cans), bakery (khari/toast/rusk), and a 30L water bottle. New catalogue
+items are **merged in on load without overwriting** existing stock, prices, or batches, and
+the latest changes are **flushed to storage on tab close / hide** so nothing is lost.
 
 ## Notes
 

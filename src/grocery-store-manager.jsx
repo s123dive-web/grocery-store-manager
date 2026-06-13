@@ -56,16 +56,16 @@ function printReceipt(sale) {
 const UNITS = ["pc", "kg", "g", "L", "ml", "packet", "dozen", "box"];
 const CATEGORIES = [
   "Cold Drinks & Water", "Ice Cream", "Chocolates & Candy", "Snacks & Biscuits",
-  "Dairy & Eggs", "Bakery & Bread", "Staples & Grains", "Fruits & Vegetables",
-  "Oil & Ghee", "Beverages", "Spices & Masala", "Frozen & Instant",
+  "Dairy & Eggs", "Bakery & Bread", "Staples & Grains", "Dry Fruits & Nuts",
+  "Fruits & Vegetables", "Oil & Ghee", "Beverages", "Spices & Masala", "Frozen & Instant",
   "Personal Care", "Household & Cleaning", "Stationery", "Sports & Toys", "Other",
 ];
 // A small emoji icon per category (used in place of product photos).
 const CATEGORY_ICONS = {
   "Cold Drinks & Water": "🥤", "Ice Cream": "🍦", "Chocolates & Candy": "🍫",
   "Snacks & Biscuits": "🍪", "Dairy & Eggs": "🥛", "Bakery & Bread": "🍞",
-  "Staples & Grains": "🌾", "Fruits & Vegetables": "🥦", "Oil & Ghee": "🛢️",
-  "Beverages": "☕", "Spices & Masala": "🌶️", "Frozen & Instant": "🍜",
+  "Staples & Grains": "🌾", "Dry Fruits & Nuts": "🥜", "Fruits & Vegetables": "🥦",
+  "Oil & Ghee": "🛢️", "Beverages": "☕", "Spices & Masala": "🌶️", "Frozen & Instant": "🍜",
   "Personal Care": "🧴", "Household & Cleaning": "🧹", "Stationery": "✏️",
   "Sports & Toys": "🏏", "Other": "📦",
 };
@@ -207,6 +207,88 @@ const SEED_ITEMS = [
   ["Sixit Cricket Balls", "Sports & Toys", "pc", 310, 490, 0, 3, 510],
   ["Abdominal Safety Guard", "Sports & Toys", "pc", 120, 180, 0, 3],
   ["Batting Supporter", "Sports & Toys", "pc", 90, 140, 0, 3],
+  // Loose staples — 500g / 1kg packs
+  ["Gehu Atta 1kg", "Staples & Grains", "packet", 38, 48, 0, 6],
+  ["Gehu Atta 500g", "Staples & Grains", "packet", 20, 26, 0, 6],
+  ["Samrat Atta 1kg", "Staples & Grains", "packet", 45, 55, 0, 6],
+  ["Sona Masoori Rice 1kg", "Staples & Grains", "kg", 55, 70, 0, 6],
+  ["Kolam Rice 1kg", "Staples & Grains", "kg", 60, 78, 0, 5],
+  ["Toor Dal 500g", "Staples & Grains", "packet", 72, 90, 0, 5],
+  ["Chana Dal 500g", "Staples & Grains", "packet", 40, 52, 0, 5],
+  ["Urad Dal 500g", "Staples & Grains", "packet", 60, 78, 0, 5],
+  ["Masoor Dal 500g", "Staples & Grains", "packet", 45, 58, 0, 5],
+  ["Moong Dal 1kg", "Staples & Grains", "kg", 130, 160, 0, 4],
+  ["Rajma 500g", "Staples & Grains", "packet", 70, 90, 0, 4],
+  ["Kabuli Chana 500g", "Staples & Grains", "packet", 55, 72, 0, 4],
+  ["Sugar 500g", "Staples & Grains", "packet", 22, 26, 0, 6],
+  // Dry Fruits & Nuts — 100/200/250/500g
+  ["Almonds 100g", "Dry Fruits & Nuts", "packet", 75, 95, 0, 4],
+  ["Almonds 250g", "Dry Fruits & Nuts", "packet", 180, 230, 0, 3],
+  ["Cashew 100g", "Dry Fruits & Nuts", "packet", 90, 120, 0, 4],
+  ["Cashew 250g", "Dry Fruits & Nuts", "packet", 220, 280, 0, 3],
+  ["Raisins (Kishmish) 200g", "Dry Fruits & Nuts", "packet", 60, 80, 0, 4],
+  ["Walnuts 200g", "Dry Fruits & Nuts", "packet", 150, 190, 0, 3],
+  ["Pistachios 100g", "Dry Fruits & Nuts", "packet", 110, 140, 0, 3],
+  ["Dates (Khajur) 500g", "Dry Fruits & Nuts", "packet", 90, 120, 0, 4],
+  // Personal care — shaving / shampoo / perfume / cosmetics
+  ["Gillette Shaving Foam 200ml", "Personal Care", "pc", 180, 210, 0, 4],
+  ["Old Spice Shaving Cream 70g", "Personal Care", "pc", 95, 115, 0, 4],
+  ["Gillette Razor Blades (5)", "Personal Care", "packet", 45, 60, 0, 6],
+  ["Clinic Plus Shampoo 175ml", "Personal Care", "pc", 75, 90, 0, 5],
+  ["Head & Shoulders Shampoo 180ml", "Personal Care", "pc", 110, 130, 0, 4],
+  ["Shampoo Sachets (16)", "Personal Care", "packet", 30, 45, 0, 6],
+  ["Fogg Perfume 100ml", "Personal Care", "pc", 230, 290, 0, 3],
+  ["Wild Stone Deo 150ml", "Personal Care", "pc", 180, 220, 0, 3],
+  ["Nivea Cream 100ml", "Personal Care", "pc", 120, 145, 0, 4],
+  ["Vaseline 100ml", "Personal Care", "pc", 95, 115, 0, 4],
+  ["Glow & Lovely Cream 50g", "Personal Care", "pc", 80, 95, 0, 4],
+  // Household — brooms & detergents
+  ["Zadu (Floor Broom)", "Household & Cleaning", "pc", 60, 90, 0, 4],
+  ["Phool Jhadu (Soft Broom)", "Household & Cleaning", "pc", 90, 130, 0, 4],
+  ["Surf Excel 1kg", "Household & Cleaning", "packet", 110, 130, 0, 4],
+  ["Surf Excel Matic 1kg", "Household & Cleaning", "packet", 200, 230, 0, 3],
+  ["Tide 1kg", "Household & Cleaning", "packet", 100, 120, 0, 4],
+  ["Ariel 1kg", "Household & Cleaning", "packet", 180, 210, 0, 3],
+  ["Ghadi Detergent 1kg", "Household & Cleaning", "packet", 60, 75, 0, 4],
+  ["Rin Bar", "Household & Cleaning", "pc", 10, 14, 0, 8],
+  ["Comfort Fabric Conditioner 200ml", "Household & Cleaning", "pc", 45, 60, 0, 4],
+  // Water
+  ["Water Bottle 30L", "Cold Drinks & Water", "pc", 40, 70, 0, 6],
+  // Ice cream — Havmor
+  ["Havmor Vanilla Cup 100ml", "Ice Cream", "pc", 18, 25, 0, 8],
+  ["Havmor Chocolate Cone", "Ice Cream", "pc", 30, 40, 0, 6],
+  ["Havmor Kulfi Stick", "Ice Cream", "pc", 22, 30, 0, 6],
+  ["Havmor Rajbhog 700ml", "Ice Cream", "pc", 160, 210, 0, 3],
+  // Snacks — Haldiram / Bikaji / Lays / Balaji / Chitale
+  ["Haldiram Bhujia Sev 200g", "Snacks & Biscuits", "packet", 48, 60, 0, 5],
+  ["Haldiram Moong Dal 200g", "Snacks & Biscuits", "packet", 45, 58, 0, 5],
+  ["Haldiram Navratan Mix 200g", "Snacks & Biscuits", "packet", 48, 62, 0, 5],
+  ["Bikaji Bhujia 200g", "Snacks & Biscuits", "packet", 45, 58, 0, 5],
+  ["Bikaji Aloo Bhujia 200g", "Snacks & Biscuits", "packet", 45, 58, 0, 5],
+  ["Balaji Wafers Masala 150g", "Snacks & Biscuits", "packet", 30, 40, 0, 6],
+  ["Balaji Chaat Chaska 150g", "Snacks & Biscuits", "packet", 30, 40, 0, 6],
+  ["Lay's Cream & Onion 52g", "Snacks & Biscuits", "packet", 16, 20, 0, 10],
+  ["Lay's India's Magic Masala 52g", "Snacks & Biscuits", "packet", 16, 20, 0, 10],
+  ["Chitale Bakarwadi 200g", "Snacks & Biscuits", "packet", 70, 90, 0, 5],
+  ["Chitale Bhajani Chakli 200g", "Snacks & Biscuits", "packet", 65, 85, 0, 4],
+  // Chocolates — Cadbury & others
+  ["Cadbury Dairy Milk 40g", "Chocolates & Candy", "pc", 35, 45, 0, 8],
+  ["Cadbury Perk", "Chocolates & Candy", "pc", 8, 10, 0, 12],
+  ["Cadbury Fuse", "Chocolates & Candy", "pc", 16, 20, 0, 8],
+  ["Cadbury Celebrations Box", "Chocolates & Candy", "box", 150, 185, 0, 3],
+  ["Ferrero Rocher (4)", "Chocolates & Candy", "packet", 130, 160, 0, 3],
+  // Oils — pouches & Gemini cans
+  ["Sunflower Oil Pouch 1L", "Oil & Ghee", "packet", 120, 140, 0, 5],
+  ["Soyabean Oil Pouch 1L", "Oil & Ghee", "packet", 115, 135, 0, 5],
+  ["Mustard Oil Pouch 1L", "Oil & Ghee", "packet", 140, 165, 0, 4],
+  ["Gemini Refined Oil 5L Can", "Oil & Ghee", "pc", 620, 720, 0, 3],
+  ["Gemini Refined Oil 15L Can", "Oil & Ghee", "pc", 1850, 2100, 0, 2],
+  // Bakery — khari, toast, rusk
+  ["Butter Khari 200g", "Bakery & Bread", "packet", 35, 50, 0, 5],
+  ["Butter Toast 200g", "Bakery & Bread", "packet", 35, 48, 0, 5],
+  ["Milk Rusk 300g", "Bakery & Bread", "packet", 40, 55, 0, 5],
+  ["Fruit Bun (4)", "Bakery & Bread", "packet", 25, 35, 0, 4],
+  ["Cream Roll (6)", "Bakery & Bread", "packet", 40, 55, 0, 4],
 ].map(([name, category, unit, buyPrice, sellPrice, , lowAt, mrp]) => ({
   // Fresh start: every catalogue item begins at 0 stock with no batches.
   id: uid(), name, category, unit, buyPrice, sellPrice, mrp: mrp ?? sellPrice,
@@ -257,9 +339,138 @@ function daysToExpiry(item) {
   return Math.round((new Date(dates[0] + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000);
 }
 
+// ---------- authentication (client-side device gate) ----------
+// NOTE: this is a client-side gate — it stops casual access on a shared device but is
+// NOT server-grade security. The data lives in this browser and is readable by anyone
+// with device + dev-tools access. For real security, host behind a server login + HTTPS.
+const AUTH_KEY = "psm-cred";
+const SESSION_KEY = "psm-session";
+const DEFAULT_USER = "prakash";
+const DEFAULT_PASS = "prakash16";
+
+const randSalt = () => {
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+
+async function hashPwd(salt, pwd) {
+  const text = salt + "::" + pwd;
+  if (crypto?.subtle?.digest) {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  let h = 0; // fallback for non-secure contexts — still a gate, not cryptographic
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) >>> 0;
+  return "fb-" + h.toString(16);
+}
+
+function getCred() {
+  try { const c = JSON.parse(localStorage.getItem(AUTH_KEY)); if (c && c.user && c.hash) return c; } catch { /* ignore */ }
+  return null;
+}
+async function ensureCred() {
+  if (getCred()) return;
+  const salt = randSalt();
+  localStorage.setItem(AUTH_KEY, JSON.stringify({ user: DEFAULT_USER, salt, hash: await hashPwd(salt, DEFAULT_PASS) }));
+}
+async function verifyLogin(user, pwd) {
+  const c = getCred();
+  if (!c) return false;
+  if (user.trim().toLowerCase() !== c.user.toLowerCase()) return false;
+  return (await hashPwd(c.salt, pwd)) === c.hash;
+}
+async function setPassword(newPwd) {
+  const c = getCred() || { user: DEFAULT_USER };
+  const salt = randSalt();
+  localStorage.setItem(AUTH_KEY, JSON.stringify({ user: c.user, salt, hash: await hashPwd(salt, newPwd) }));
+}
+
+function Login({ onAuth }) {
+  const [user, setUser] = useState(DEFAULT_USER);
+  const [pwd, setPwd] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [tries, setTries] = useState(0);
+  const [lockUntil, setLockUntil] = useState(0);
+
+  useEffect(() => { ensureCred(); }, []);
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    if (Date.now() < lockUntil) return;
+    setBusy(true);
+    await ensureCred();
+    const ok = await verifyLogin(user, pwd);
+    setBusy(false);
+    if (ok) { sessionStorage.setItem(SESSION_KEY, "1"); onAuth(); return; }
+    const t = tries + 1;
+    setTries(t);
+    setPwd("");
+    if (t >= 5) { setLockUntil(Date.now() + 30000); setErr("Too many attempts — wait 30 seconds and try again."); }
+    else setErr("Incorrect username or password.");
+  };
+
+  const locked = Date.now() < lockUntil;
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#10331F", padding: 16 }}>
+      <style>{CSS}</style>
+      <form onSubmit={submit} style={{ background: "#fff", borderRadius: 16, padding: "26px 24px", width: "min(380px, 94vw)", boxShadow: "0 12px 40px rgba(0,0,0,.3)" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ ...S.logoMark, width: 44, height: 44, fontSize: 20 }}>P</div>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>{STORE.name}</div>
+            <div style={{ fontSize: 11.5, color: "#8A9C90" }}>{STORE.address}</div>
+          </div>
+        </div>
+        <h2 style={{ fontSize: 16, margin: "18px 0 12px" }}>Sign in</h2>
+        <Field label="Username"><input className="input" value={user} autoComplete="username" onChange={(e) => setUser(e.target.value)} /></Field>
+        <Field label="Password"><input className="input" type="password" value={pwd} autoComplete="current-password" autoFocus onChange={(e) => setPwd(e.target.value)} /></Field>
+        {err && <div style={{ color: "#C44536", fontSize: 13, marginBottom: 8 }}>{err}</div>}
+        <button className="btn primary big" type="submit" style={{ width: "100%" }} disabled={busy || locked}>{busy ? "Checking…" : "Sign in"}</button>
+        <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 14, lineHeight: 1.5 }}>
+          First-time login <b>{DEFAULT_USER}</b> / <b>{DEFAULT_PASS}</b> — change it after signing in (🔑 Password in the sidebar). This is a device-level gate, not server security.
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ChangePassword({ onClose, notify }) {
+  const [cur, setCur] = useState("");
+  const [nw, setNw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    const c = getCred();
+    const ok = await verifyLogin(c?.user || DEFAULT_USER, cur);
+    if (!ok) { setBusy(false); return notify("Current password is incorrect"); }
+    if (nw.length < 4) { setBusy(false); return notify("New password must be at least 4 characters"); }
+    await setPassword(nw);
+    setBusy(false);
+    notify("Password updated");
+    onClose();
+  };
+  return (
+    <Modal title="Change password" onClose={onClose}>
+      <Field label="Current password"><input className="input" type="password" autoFocus value={cur} onChange={(e) => setCur(e.target.value)} /></Field>
+      <Field label="New password"><input className="input" type="password" value={nw} onChange={(e) => setNw(e.target.value)} /></Field>
+      <button className="btn primary big" style={{ width: "100%", marginTop: 8 }} disabled={busy} onClick={save}>Update password</button>
+    </Modal>
+  );
+}
+
+// ---------- root: auth gate ----------
+export default function App() {
+  const [authed, setAuthed] = useState(() => sessionStorage.getItem(SESSION_KEY) === "1");
+  if (!authed) return <Login onAuth={() => setAuthed(true)} />;
+  return <StoreManager onLogout={() => { sessionStorage.removeItem(SESSION_KEY); setAuthed(false); }} />;
+}
+
 // ---------- main app ----------
-export default function GroceryStoreManager() {
+function StoreManager({ onLogout }) {
   const [tab, setTab] = useState("dashboard");
+  const [showPwd, setShowPwd] = useState(false);
   const [items, setItems] = useState([]);
   const [sales, setSales] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -274,14 +485,20 @@ export default function GroceryStoreManager() {
         const r = await window.storage.get(STORAGE_KEY);
         if (r && r.value) {
           const d = JSON.parse(r.value);
-          setItems(d.items || []);
-          setSales(d.sales || []);
-          setExpenses(d.expenses || []);
-          setLogs(d.logs || []);
+          const stored = Array.isArray(d.items) ? d.items : [];
+          // Non-destructive merge: add any new catalogue items not already present
+          // (by name) without touching existing stock, prices, or batches.
+          const have = new Set(stored.map((i) => (i.name || "").toLowerCase()));
+          const missing = SEED_ITEMS.filter((s) => !have.has(s.name.toLowerCase()));
+          setItems(missing.length ? [...stored, ...missing] : stored);
+          setSales(Array.isArray(d.sales) ? d.sales : []);
+          setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
+          setLogs(Array.isArray(d.logs) ? d.logs : []);
         } else {
           setItems(SEED_ITEMS);
         }
-      } catch {
+      } catch (e) {
+        console.error("load failed", e);
         setItems(SEED_ITEMS);
       }
       setLoaded(true);
@@ -303,6 +520,24 @@ export default function GroceryStoreManager() {
     }, 400);
     return () => clearTimeout(saveTimer.current);
   }, [items, sales, expenses, logs, loaded]);
+
+  // Flush the latest snapshot synchronously when the page is hidden/closed, so a
+  // change made within the debounce window is never lost.
+  const dataRef = useRef({ items, sales, expenses, logs });
+  dataRef.current = { items, sales, expenses, logs };
+  useEffect(() => {
+    if (!loaded) return;
+    const flush = () => { try { window.storage.set(STORAGE_KEY, JSON.stringify(dataRef.current)); } catch (e) { console.error("flush failed", e); } };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [loaded]);
 
   const notify = (msg) => {
     setToast(msg);
@@ -410,10 +645,16 @@ export default function GroceryStoreManager() {
             <input type="file" accept=".json,.xlsx,.xls,application/json" onChange={importData} style={{ display: "none" }} />
           </label>
         </div>
+        <div style={{ display: "flex", gap: 6, padding: "8px 8px 4px" }}>
+          <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={() => setShowPwd(true)}>🔑 Password</button>
+          <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={onLogout}>⎋ Logout</button>
+        </div>
         <div style={{ fontSize: 11, color: "#6E8A7C", padding: "6px 14px 8px" }}>
           Saved on this device. Back up regularly.
         </div>
       </nav>
+
+      {showPwd && <ChangePassword onClose={() => setShowPwd(false)} notify={notify} />}
 
       {/* main */}
       <main className="main" style={S.main}>
@@ -1910,7 +2151,7 @@ const S = {
   nav: { width: 210, background: "#10331F", color: "#E6F0E9", display: "flex", flexDirection: "column", gap: 4, padding: "16px 10px", position: "sticky", top: 0, height: "100vh", boxSizing: "border-box" },
   logo: { display: "flex", gap: 10, alignItems: "center", padding: "4px 8px 18px" },
   logoMark: { width: 38, height: 38, borderRadius: 10, background: "#E8A33D", color: "#10331F", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 17 },
-  main: { flex: 1, padding: "26px 30px", maxWidth: 1100 },
+  main: { flex: 1, padding: "26px 30px", maxWidth: 1280, margin: "0 auto", width: "100%", boxSizing: "border-box" },
   cards: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 },
   card: { background: "#fff", borderRadius: 14, padding: "16px 18px", border: "1px solid #E2EAE3" },
   panel: { background: "#fff", borderRadius: 14, padding: 16, border: "1px solid #E2EAE3" },
@@ -1953,6 +2194,8 @@ const CSS = `
            flex-direction:row !important; flex-wrap:wrap !important; gap:4px !important; }
     .nav .navbtn { width:auto !important; }
     .main { padding:16px !important; max-width:none !important; }
+    /* 16px inputs stop mobile browsers auto-zooming on focus */
+    .input { font-size:16px; }
     /* inline grids are 2- or 4-column; collapse them all on small screens */
     [style*="grid-template-columns"] { grid-template-columns:1fr !important; }
     /* let wide tables scroll horizontally instead of overflowing the panel */

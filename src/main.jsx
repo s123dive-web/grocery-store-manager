@@ -1,6 +1,6 @@
 import { StrictMode, Component } from "react";
 import { createRoot } from "react-dom/client";
-import GroceryStoreManager from "./grocery-store-manager.jsx";
+import App from "./grocery-store-manager.jsx";
 
 // ----------------------------------------------------------------------------
 // Error boundary — without this, any render-time exception unmounts the whole
@@ -60,7 +60,7 @@ if (!window.storage) {
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <ErrorBoundary>
-      <GroceryStoreManager />
+      <App />
     </ErrorBoundary>
   </StrictMode>
 );
