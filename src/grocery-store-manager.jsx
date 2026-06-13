@@ -1037,8 +1037,15 @@ function Inventory({ items, setItems, notify, log }) {
       mrp: +f.mrp || sell, lowAt,
     };
     if (f.id) {
-      setItems(items.map((i) => (i.id === f.id ? { ...i, ...base, updatedAt: todayStr() } : i)));
-      log("inventory", `Edited item “${base.name}”`);
+      const cur = items.find((i) => i.id === f.id);
+      const newStock = Math.max(0, +f.stock || 0);
+      const diff = newStock - (cur.stock || 0);
+      let updated = { ...cur, ...base, updatedAt: todayStr() };
+      // Reconcile batches with the edited stock: grow → new batch, shrink → FIFO deplete.
+      if (diff > 0) updated = addBatch(updated, diff, f.expiry, todayStr());
+      else if (diff < 0) updated = removeStock(updated, -diff, todayStr());
+      setItems(items.map((i) => (i.id === f.id ? updated : i)));
+      log("inventory", `Edited item “${base.name}”` + (diff ? ` · stock ${cur.stock || 0}→${newStock}` : ""));
       notify("Item updated");
     } else {
       const stock = +f.stock || 0;
@@ -1166,11 +1173,11 @@ function Inventory({ items, setItems, notify, log }) {
             <Field label="MRP (₹)"><input className="input" type="number" min="0" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} /></Field>
             <Field label="Buying price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.buyPrice} onChange={(e) => setForm({ ...form, buyPrice: e.target.value })} /></Field>
             <Field label="Selling price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.sellPrice} onChange={(e) => setForm({ ...form, sellPrice: e.target.value })} /></Field>
-            {!form.id && <Field label="Opening stock"><input className="input" type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>}
-            {!form.id && <Field label="Expiry (optional)"><input className="input" type="date" value={form.expiry} onChange={(e) => setForm({ ...form, expiry: e.target.value })} /></Field>}
+            <Field label={form.id ? "Stock quantity" : "Opening stock"}><input className="input" type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>
+            <Field label={form.id ? "Expiry (for added stock)" : "Expiry (optional)"}><input className="input" type="date" value={form.expiry} onChange={(e) => setForm({ ...form, expiry: e.target.value })} /></Field>
             <Field label="Alert when stock below"><input className="input" type="number" min="0" value={form.lowAt} onChange={(e) => setForm({ ...form, lowAt: e.target.value })} /></Field>
           </div>
-          {form.id && <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>To add stock with an expiry date, close this and use <b>Restock</b>.</div>}
+          {form.id && <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>Changing stock here adjusts batches automatically (increase adds a batch using the expiry above; decrease removes earliest-expiry stock first). For a specific dated batch, use <b>Restock</b>.</div>}
           <button className="btn primary big" style={{ width: "100%", marginTop: 14 }} onClick={save}>
             {form.id ? "Save changes" : "Add item"}
           </button>
