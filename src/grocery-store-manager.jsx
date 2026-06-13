@@ -1,0 +1,1103 @@
+import { useState, useEffect, useMemo, useRef } from "react";
+
+// ---------- helpers ----------
+const INR = (n) =>
+  "₹" + Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+// Round money to 2 decimals so bill totals don't drift (e.g. 0.1 + 0.2 = 0.30000004).
+const money = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+// Local calendar date as YYYY-MM-DD. MUST be local, not toISOString() (which is UTC)
+// — otherwise early-morning sales in IST get filed under the previous day.
+const dateStr = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const todayStr = () => dateStr(new Date());
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const escapeHtml = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// Open a thermal-style receipt in a new window and trigger the print dialog.
+function printReceipt(sale) {
+  const rows = sale.lines
+    .map(
+      (l) =>
+        `<tr><td>${escapeHtml(l.name)}</td><td class="c">${l.qty}</td><td class="r">${INR(l.amount)}</td></tr>`
+    )
+    .join("");
+  const w = window.open("", "_blank", "width=340,height=620");
+  if (!w) return; // popup blocked
+  w.document.write(
+    `<!doctype html><html><head><meta charset="utf-8"><title>Receipt</title>
+    <style>body{font-family:'Courier New',monospace;padding:10px;width:280px;color:#000}
+    h2{text-align:center;margin:4px 0}.meta{text-align:center;font-size:11px}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+    td{padding:2px 0}.c{text-align:center}.r{text-align:right}
+    .tot td{border-top:1px dashed #000;font-weight:bold;padding-top:4px}
+    .ft{text-align:center;font-size:11px;margin-top:8px;border-top:1px dashed #000;padding-top:6px}</style>
+    </head><body>
+    <h2>Dukaan Manager</h2>
+    <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
+    <table>${rows}
+    <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
+    </table>
+    <div class="ft">Thank you! Please visit again.</div>
+    <script>window.onload=function(){window.print()}<\/script>
+    </body></html>`
+  );
+  w.document.close();
+}
+const UNITS = ["pc", "kg", "g", "L", "ml", "packet", "dozen", "box"];
+const CATEGORIES = [
+  "Cold Drinks & Water", "Ice Cream", "Chocolates & Candy", "Snacks & Biscuits",
+  "Dairy & Eggs", "Bakery & Bread", "Staples & Grains", "Fruits & Vegetables",
+  "Oil & Ghee", "Beverages", "Spices & Masala", "Frozen & Instant",
+  "Personal Care", "Household & Cleaning", "Other",
+];
+
+// Catalog tuned for a Pashan–Baner (Pune) society convenience store:
+// top-up shoppers, kids' favourites, always-moving chilled stock.
+const SEED_ITEMS = [
+  // Cold Drinks & Water — the never-stops shelf
+  ["Bisleri Water 1L", "Cold Drinks & Water", "pc", 16, 20, 48, 12],
+  ["Bisleri Water 500ml", "Cold Drinks & Water", "pc", 8, 10, 48, 12],
+  ["Kinley Water 1L", "Cold Drinks & Water", "pc", 15, 20, 24, 8],
+  ["Coca-Cola 750ml", "Cold Drinks & Water", "pc", 32, 40, 24, 6],
+  ["Thums Up 750ml", "Cold Drinks & Water", "pc", 32, 40, 24, 6],
+  ["Sprite 750ml", "Cold Drinks & Water", "pc", 32, 40, 18, 6],
+  ["Maaza 600ml", "Cold Drinks & Water", "pc", 30, 38, 18, 6],
+  ["Frooti 250ml Tetra", "Cold Drinks & Water", "pc", 16, 20, 30, 10],
+  ["Sting Energy 250ml", "Cold Drinks & Water", "pc", 16, 20, 24, 8],
+  ["Red Bull 250ml", "Cold Drinks & Water", "pc", 99, 125, 12, 4],
+  ["Paper Boat Aam Panna", "Cold Drinks & Water", "pc", 28, 35, 12, 4],
+  ["Amul Masti Buttermilk 200ml", "Cold Drinks & Water", "pc", 12, 15, 24, 8],
+  // Ice Cream — kids' magnet
+  ["Amul Vanilla Cup 100ml", "Ice Cream", "pc", 16, 20, 24, 8],
+  ["Amul Kulfi Stick", "Ice Cream", "pc", 20, 25, 20, 6],
+  ["Amul Tricone Chocolate", "Ice Cream", "pc", 28, 35, 16, 5],
+  ["Cornetto Double Chocolate", "Ice Cream", "pc", 32, 40, 16, 5],
+  ["Magnum Almond", "Ice Cream", "pc", 72, 90, 10, 3],
+  ["Vadilal Cassata Slice", "Ice Cream", "pc", 48, 60, 8, 3],
+  ["Amul Vanilla Family Pack 700ml", "Ice Cream", "pc", 140, 180, 6, 2],
+  // Chocolates & Candy — pocket-money zone
+  ["Dairy Milk (small)", "Chocolates & Candy", "pc", 8, 10, 60, 15],
+  ["Dairy Milk Silk 60g", "Chocolates & Candy", "pc", 76, 95, 15, 5],
+  ["KitKat 4-Finger", "Chocolates & Candy", "pc", 16, 20, 40, 10],
+  ["5 Star", "Chocolates & Candy", "pc", 8, 10, 50, 12],
+  ["Munch", "Chocolates & Candy", "pc", 8, 10, 50, 12],
+  ["Cadbury Gems", "Chocolates & Candy", "pc", 8, 10, 40, 10],
+  ["Kinder Joy", "Chocolates & Candy", "pc", 40, 50, 20, 6],
+  ["Pulse Candy", "Chocolates & Candy", "pc", 0.8, 1, 200, 50],
+  ["Alpenliebe Lollipop", "Chocolates & Candy", "pc", 1.6, 2, 100, 25],
+  ["Choco Pie Box (12)", "Chocolates & Candy", "box", 110, 140, 8, 3],
+  // Snacks & Biscuits
+  ["Lay's Magic Masala", "Snacks & Biscuits", "packet", 16, 20, 40, 10],
+  ["Kurkure Masala Munch", "Snacks & Biscuits", "packet", 16, 20, 40, 10],
+  ["Bingo Mad Angles", "Snacks & Biscuits", "packet", 16, 20, 24, 8],
+  ["Pringles Original", "Snacks & Biscuits", "pc", 88, 110, 8, 3],
+  ["Haldiram Aloo Bhujia 200g", "Snacks & Biscuits", "packet", 44, 55, 15, 5],
+  ["Parle-G", "Snacks & Biscuits", "packet", 8, 10, 60, 15],
+  ["Oreo Chocolate", "Snacks & Biscuits", "packet", 24, 30, 30, 8],
+  ["Hide & Seek", "Snacks & Biscuits", "packet", 24, 30, 24, 8],
+  ["Britannia Good Day", "Snacks & Biscuits", "packet", 24, 30, 24, 8],
+  ["Little Hearts", "Snacks & Biscuits", "packet", 8, 10, 30, 10],
+  ["Monaco", "Snacks & Biscuits", "packet", 24, 30, 20, 6],
+  // Dairy & Eggs — daily top-ups
+  ["Amul Taaza Milk 500ml", "Dairy & Eggs", "packet", 26, 29, 30, 10],
+  ["Amul Gold Milk 500ml", "Dairy & Eggs", "packet", 31, 34, 24, 8],
+  ["Chitale Full Cream Milk 500ml", "Dairy & Eggs", "packet", 30, 33, 24, 8],
+  ["Amul Dahi 400g", "Dairy & Eggs", "pc", 30, 35, 15, 5],
+  ["Amul Butter 100g", "Dairy & Eggs", "pc", 56, 62, 15, 5],
+  ["Amul Cheese Slices (10)", "Dairy & Eggs", "packet", 130, 145, 10, 3],
+  ["Amul Paneer 200g", "Dairy & Eggs", "packet", 88, 99, 12, 4],
+  ["Eggs", "Dairy & Eggs", "dozen", 75, 90, 15, 5],
+  // Bakery & Bread
+  ["Brown Bread", "Bakery & Bread", "packet", 45, 55, 12, 4],
+  ["White Sandwich Bread", "Bakery & Bread", "packet", 30, 40, 12, 4],
+  ["Ladi Pav (6 pc)", "Bakery & Bread", "packet", 18, 25, 15, 5],
+  ["Pune Khari 200g", "Bakery & Bread", "packet", 35, 50, 10, 3],
+  // Staples — top-up sizes, not bulk
+  ["Aashirvaad Atta 1kg", "Staples & Grains", "packet", 52, 60, 15, 5],
+  ["India Gate Basmati 1kg", "Staples & Grains", "packet", 130, 155, 10, 3],
+  ["Tata Salt 1kg", "Staples & Grains", "packet", 23, 28, 25, 8],
+  ["Sugar 1kg", "Staples & Grains", "kg", 42, 48, 20, 6],
+  ["Toor Dal 1kg", "Staples & Grains", "packet", 140, 165, 10, 3],
+  ["Moong Dal 500g", "Staples & Grains", "packet", 70, 85, 10, 3],
+  ["Poha 500g", "Staples & Grains", "packet", 30, 40, 15, 5],
+  ["Rava 500g", "Staples & Grains", "packet", 28, 35, 12, 4],
+  ["Besan 500g", "Staples & Grains", "packet", 45, 55, 10, 3],
+  // Fruits & Vegetables — emergency veggies
+  ["Onion", "Fruits & Vegetables", "kg", 28, 38, 20, 5],
+  ["Potato", "Fruits & Vegetables", "kg", 22, 30, 20, 5],
+  ["Tomato", "Fruits & Vegetables", "kg", 25, 35, 15, 4],
+  ["Banana", "Fruits & Vegetables", "dozen", 45, 60, 10, 3],
+  ["Lemon", "Fruits & Vegetables", "pc", 4, 6, 40, 10],
+  ["Coriander Bunch", "Fruits & Vegetables", "pc", 8, 15, 15, 5],
+  ["Green Chilli 100g", "Fruits & Vegetables", "packet", 8, 12, 15, 5],
+  ["Ginger 100g", "Fruits & Vegetables", "packet", 8, 12, 12, 4],
+  ["Garlic 100g", "Fruits & Vegetables", "packet", 12, 18, 12, 4],
+  // Oil & Ghee
+  ["Fortune Sunflower Oil 1L", "Oil & Ghee", "packet", 130, 145, 12, 4],
+  ["Saffola Gold 1L", "Oil & Ghee", "packet", 175, 199, 8, 3],
+  ["Amul Ghee 500ml", "Oil & Ghee", "pc", 290, 320, 8, 3],
+  // Beverages (hot)
+  ["Tata Tea Premium 250g", "Beverages", "packet", 72, 85, 12, 4],
+  ["Nescafe Classic 50g", "Beverages", "pc", 150, 170, 10, 3],
+  ["Bru Instant 50g", "Beverages", "pc", 85, 95, 10, 3],
+  ["Bournvita 500g", "Beverages", "pc", 220, 250, 8, 3],
+  ["Horlicks 500g", "Beverages", "pc", 230, 260, 8, 3],
+  // Spices & Masala
+  ["Everest Garam Masala 50g", "Spices & Masala", "packet", 38, 45, 12, 4],
+  ["MDH Chana Masala 100g", "Spices & Masala", "packet", 38, 45, 10, 3],
+  ["Haldi Powder 100g", "Spices & Masala", "packet", 30, 38, 12, 4],
+  ["Red Chilli Powder 100g", "Spices & Masala", "packet", 38, 45, 12, 4],
+  ["Jeera 100g", "Spices & Masala", "packet", 35, 45, 10, 3],
+  // Frozen & Instant — IT-crowd dinner savers
+  ["Maggi 2-Min Noodles", "Frozen & Instant", "packet", 11, 14, 60, 15],
+  ["Yippee Noodles", "Frozen & Instant", "packet", 11, 14, 30, 10],
+  ["Cup Noodles", "Frozen & Instant", "pc", 40, 50, 15, 5],
+  ["ID Dosa Batter 1kg", "Frozen & Instant", "packet", 75, 95, 12, 4],
+  ["McCain French Fries 420g", "Frozen & Instant", "packet", 90, 110, 8, 3],
+  ["Safal Green Peas 500g", "Frozen & Instant", "packet", 60, 75, 8, 3],
+  ["Frozen Veg Momos (12)", "Frozen & Instant", "packet", 110, 140, 6, 2],
+  // Personal Care
+  ["Colgate Strong Teeth 100g", "Personal Care", "pc", 52, 60, 15, 5],
+  ["Dove Soap 100g", "Personal Care", "pc", 48, 58, 15, 5],
+  ["Lifebuoy Soap 125g", "Personal Care", "pc", 28, 34, 15, 5],
+  ["Dove Shampoo 180ml", "Personal Care", "pc", 110, 130, 8, 3],
+  ["Dettol Handwash Refill 175ml", "Personal Care", "pc", 75, 90, 10, 3],
+  ["Gillette Guard Razor", "Personal Care", "pc", 75, 90, 10, 3],
+  ["Stayfree Secure XL (6)", "Personal Care", "packet", 45, 55, 12, 4],
+  // Household & Cleaning
+  ["Vim Bar", "Household & Cleaning", "pc", 8, 10, 25, 8],
+  ["Surf Excel 500g", "Household & Cleaning", "packet", 60, 70, 12, 4],
+  ["Lizol 500ml", "Household & Cleaning", "pc", 95, 110, 8, 3],
+  ["Harpic 500ml", "Household & Cleaning", "pc", 80, 92, 8, 3],
+  ["Garbage Bags Medium (30)", "Household & Cleaning", "packet", 50, 65, 12, 4],
+  ["Scotch-Brite Scrub Pad", "Household & Cleaning", "pc", 18, 25, 15, 5],
+  ["Good Knight Refill", "Household & Cleaning", "pc", 65, 75, 12, 4],
+  ["Aluminium Foil 9m", "Household & Cleaning", "pc", 50, 65, 8, 3],
+].map(([name, category, unit, buyPrice, sellPrice, stock, lowAt]) => ({
+  id: uid(), name, category, unit, buyPrice, sellPrice, stock, lowAt,
+}));
+
+const STORAGE_KEY = "kirana-data-v2";
+
+// ---------- main app ----------
+export default function GroceryStoreManager() {
+  const [tab, setTab] = useState("dashboard");
+  const [items, setItems] = useState([]);
+  const [sales, setSales] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  // load
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get(STORAGE_KEY);
+        if (r && r.value) {
+          const d = JSON.parse(r.value);
+          setItems(d.items || []);
+          setSales(d.sales || []);
+          setExpenses(d.expenses || []);
+        } else {
+          setItems(SEED_ITEMS);
+        }
+      } catch {
+        setItems(SEED_ITEMS);
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  // save (debounced)
+  const saveTimer = useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await window.storage.set(STORAGE_KEY, JSON.stringify({ items, sales, expenses }));
+      } catch (e) {
+        console.error("save failed", e);
+        notify("⚠ Could not save — device storage may be full. Download a backup now.");
+      }
+    }, 400);
+    return () => clearTimeout(saveTimer.current);
+  }, [items, sales, expenses, loaded]);
+
+  const notify = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2200);
+  };
+
+  const exportData = () => {
+    const blob = new Blob(
+      [JSON.stringify({ items, sales, expenses, exportedAt: new Date().toISOString() }, null, 2)],
+      { type: "application/json" }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dukaan-backup-${todayStr()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    notify("Backup downloaded");
+  };
+
+  const importData = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // allow re-importing the same file later
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const d = JSON.parse(r.result);
+        if (!d || !Array.isArray(d.items)) throw new Error("bad file");
+        if (!confirm("Restore this backup? It will REPLACE all current data on this device.")) return;
+        setItems(d.items);
+        setSales(Array.isArray(d.sales) ? d.sales : []);
+        setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
+        notify("Backup restored");
+      } catch {
+        notify("⚠ That file is not a valid backup.");
+      }
+    };
+    r.onerror = () => notify("⚠ Could not read that file.");
+    r.readAsText(f);
+  };
+
+  const lowStock = items.filter((i) => i.stock <= i.lowAt);
+
+  return (
+    <div className="app" style={S.app}>
+      <style>{CSS}</style>
+      {/* sidebar */}
+      <nav className="nav" style={S.nav}>
+        <div style={S.logo}>
+          <div style={S.logoMark}>दु</div>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 15, letterSpacing: "-0.02em" }}>Dukaan Manager</div>
+            <div style={{ fontSize: 11, color: "#9DB5A8" }}>Grocery POS &amp; Inventory</div>
+          </div>
+        </div>
+        {[
+          ["dashboard", "⌂", "Dashboard"],
+          ["billing", "₹", "Billing (POS)"],
+          ["inventory", "▦", "Inventory"],
+          ["scan", "✦", "Scan Photo"],
+          ["sales", "⊟", "Sales History"],
+          ["finance", "∑", "Finance"],
+        ].map(([k, ic, label]) => (
+          <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
+            <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
+            {k === "inventory" && lowStock.length > 0 && (
+              <span style={S.badge}>{lowStock.length}</span>
+            )}
+          </button>
+        ))}
+        <div style={{ marginTop: "auto", display: "flex", gap: 6, padding: "8px 8px 4px" }}>
+          <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={exportData}>⬇ Backup</button>
+          <label className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center", cursor: "pointer" }}>
+            ⬆ Restore
+            <input type="file" accept="application/json" onChange={importData} style={{ display: "none" }} />
+          </label>
+        </div>
+        <div style={{ fontSize: 11, color: "#6E8A7C", padding: "0 14px 8px" }}>
+          Saved on this device. Back up regularly.
+        </div>
+      </nav>
+
+      {/* main */}
+      <main className="main" style={S.main}>
+        {!loaded ? (
+          <div style={{ padding: 40, color: "#667" }}>Loading store data…</div>
+        ) : tab === "dashboard" ? (
+          <Dashboard items={items} sales={sales} expenses={expenses} lowStock={lowStock} goBilling={() => setTab("billing")} />
+        ) : tab === "billing" ? (
+          <Billing items={items} setItems={setItems} setSales={setSales} notify={notify} />
+        ) : tab === "inventory" ? (
+          <Inventory items={items} setItems={setItems} notify={notify} />
+        ) : tab === "scan" ? (
+          <ScanTab items={items} setItems={setItems} setSales={setSales} notify={notify} />
+        ) : tab === "sales" ? (
+          <SalesHistory sales={sales} />
+        ) : (
+          <Finance sales={sales} expenses={expenses} setExpenses={setExpenses} notify={notify} />
+        )}
+      </main>
+
+      {toast && <div style={S.toast}>{toast}</div>}
+    </div>
+  );
+}
+
+// ---------- Dashboard ----------
+function Dashboard({ items, sales, expenses, lowStock, goBilling }) {
+  const t = todayStr();
+  const todaySales = sales.filter((s) => s.date === t);
+  const rev = todaySales.reduce((a, s) => a + s.total, 0);
+  const profit = todaySales.reduce((a, s) => a + s.profit, 0);
+  const stockValue = items.reduce((a, i) => a + i.buyPrice * i.stock, 0);
+  const month = t.slice(0, 7);
+  const monthRev = sales.filter((s) => s.date.startsWith(month)).reduce((a, s) => a + s.total, 0);
+
+  return (
+    <div>
+      <Header title="Dashboard" sub={new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })} />
+      <div style={S.cards}>
+        <Card label="Today's sales" value={INR(rev)} sub={todaySales.length + " bills"} />
+        <Card label="Today's profit" value={INR(profit)} sub="after item cost" accent />
+        <Card label="This month" value={INR(monthRev)} sub="total revenue" />
+        <Card label="Stock value" value={INR(stockValue)} sub={items.length + " items (at cost)"} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <section style={S.panel}>
+          <div style={S.panelHead}>
+            Low stock — reorder soon
+            {lowStock.length > 0 && <span style={{ ...S.badge, position: "static", marginLeft: 8 }}>{lowStock.length}</span>}
+          </div>
+          {lowStock.length === 0 ? (
+            <Empty text="All items are well stocked." />
+          ) : (
+            lowStock.slice(0, 8).map((i) => (
+              <div key={i.id} style={S.row}>
+                <span>{i.name}</span>
+                <span style={{ color: "#C44536", fontWeight: 700 }}>{i.stock} {i.unit} left</span>
+              </div>
+            ))
+          )}
+        </section>
+        <section style={S.panel}>
+          <div style={S.panelHead}>Recent bills</div>
+          {todaySales.length === 0 ? (
+            <Empty text="No bills yet today.">
+              <button className="btn primary" onClick={goBilling}>Start billing</button>
+            </Empty>
+          ) : (
+            [...todaySales].reverse().slice(0, 8).map((s) => (
+              <div key={s.id} style={S.row}>
+                <span>{s.time} · {s.lines.length} items</span>
+                <b>{INR(s.total)}</b>
+              </div>
+            ))
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Billing / POS ----------
+function Billing({ items, setItems, setSales, notify }) {
+  const [q, setQ] = useState("");
+  const [cart, setCart] = useState([]); // {id, name, unit, sellPrice, buyPrice, qty}
+  const [lastSale, setLastSale] = useState(null);
+  const searchRef = useRef(null);
+  useEffect(() => searchRef.current?.focus(), []);
+
+  const results = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const pool = s
+      ? items.filter((i) => i.name.toLowerCase().includes(s) || (i.code || "").toLowerCase().includes(s))
+      : items;
+    return pool.slice(0, 12);
+  }, [q, items]);
+
+  const add = (item) => {
+    if (item.stock <= 0) return notify("Out of stock: " + item.name);
+    const ex = cart.find((c) => c.id === item.id);
+    if (ex && ex.qty + 1 > item.stock) return notify("Only " + item.stock + " " + item.unit + " in stock");
+    // Functional update so rapid clicks / scanner input never read a stale cart.
+    setCart((cart) => {
+      const ex = cart.find((c) => c.id === item.id);
+      return ex
+        ? cart.map((c) => (c.id === item.id ? { ...c, qty: c.qty + 1 } : c))
+        : [...cart, { id: item.id, name: item.name, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: 1 }];
+    });
+  };
+  const setQty = (id, qty) => {
+    const stock = items.find((i) => i.id === id)?.stock ?? 0;
+    if (qty > stock) { notify("Only " + stock + " in stock"); qty = stock; }
+    const q = qty;
+    setCart((cart) => (q <= 0 ? cart.filter((c) => c.id !== id) : cart.map((c) => (c.id === id ? { ...c, qty: q } : c))));
+  };
+
+  // Enter (or a barcode scanner, which types then sends Enter) adds the best match.
+  const onSearchKey = (e) => {
+    if (e.key !== "Enter" || results.length === 0) return;
+    const code = q.trim().toLowerCase();
+    const exact = results.find((i) => (i.code || "").toLowerCase() === code && code);
+    add(exact || results[0]);
+    setQ("");
+  };
+
+  const total = money(cart.reduce((a, c) => a + c.sellPrice * c.qty, 0));
+  const profit = money(cart.reduce((a, c) => a + (c.sellPrice - c.buyPrice) * c.qty, 0));
+
+  const completeSale = () => {
+    if (cart.length === 0) return;
+    const now = new Date();
+    const sale = {
+      id: uid(),
+      date: todayStr(),
+      time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+      lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, amount: money(c.sellPrice * c.qty) })),
+      total, profit,
+    };
+    setSales((s) => [...s, sale]);
+    setItems((its) => its.map((i) => {
+      const c = cart.find((x) => x.id === i.id);
+      return c ? { ...i, stock: Math.max(0, i.stock - c.qty) } : i;
+    }));
+    setLastSale(sale);
+    setCart([]);
+    setQ("");
+    searchRef.current?.focus();
+    notify("Bill saved — " + INR(total));
+  };
+
+  return (
+    <div>
+      <Header title="Billing" sub="Tap an item to add it to the bill" />
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
+        {/* item picker */}
+        <section style={S.panel}>
+          <input
+            ref={searchRef}
+            className="input"
+            placeholder="Search or scan barcode… (Enter adds top match)"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={onSearchKey}
+            aria-label="Search items or scan barcode"
+            style={{ marginBottom: 12 }}
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {results.map((i) => (
+              <button key={i.id} className="pick" onClick={() => add(i)} disabled={i.stock <= 0}>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}>{i.name}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
+                  <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
+                  <span style={{ color: i.stock <= i.lowAt ? "#C44536" : "#789" }}>{i.stock <= 0 ? "Out of stock" : i.stock + " left"}</span>
+                </div>
+              </button>
+            ))}
+            {results.length === 0 && <Empty text="No items match. Add it from Inventory first." />}
+          </div>
+        </section>
+
+        {/* receipt cart */}
+        <section style={S.receipt}>
+          <div style={S.receiptHead}>CURRENT BILL</div>
+          {cart.length === 0 ? (
+            <Empty text="Bill is empty. Tap items on the left to add.">
+              {lastSale && (
+                <button className="btn" onClick={() => printReceipt(lastSale)}>🖨 Print last bill · {INR(lastSale.total)}</button>
+              )}
+            </Empty>
+          ) : (
+            <>
+              {cart.map((c) => (
+                <div key={c.id} style={S.rcptLine}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</div>
+                    <div style={{ fontSize: 11.5, color: "#777" }}>{INR(c.sellPrice)} × {c.qty} {c.unit}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button className="qty" aria-label={"Decrease " + c.name} onClick={() => setQty(c.id, c.qty - 1)}>−</button>
+                    <span style={{ minWidth: 22, textAlign: "center", fontWeight: 700 }}>{c.qty}</span>
+                    <button className="qty" aria-label={"Increase " + c.name} onClick={() => setQty(c.id, c.qty + 1)}>+</button>
+                  </div>
+                  <b style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{INR(c.sellPrice * c.qty)}</b>
+                </div>
+              ))}
+              <div style={S.rcptTotal}>
+                <span>TOTAL</span>
+                <span>{INR(total)}</span>
+              </div>
+              <div style={{ fontSize: 12, color: "#1B5E43", textAlign: "right", marginTop: 2 }}>
+                Profit on this bill: {INR(profit)}
+              </div>
+              <button className="btn primary big" onClick={completeSale} style={{ marginTop: 14, width: "100%" }}>
+                Complete sale · {INR(total)}
+              </button>
+              <button className="btn ghost" onClick={() => setCart([])} style={{ marginTop: 8, width: "100%" }}>
+                Clear bill
+              </button>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Inventory ----------
+const blankItem = { name: "", code: "", category: CATEGORIES[0], unit: "pc", buyPrice: "", sellPrice: "", stock: "", lowAt: 5 };
+
+function Inventory({ items, setItems, notify }) {
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("All");
+  const [form, setForm] = useState(null); // null | {…item, id?}
+  const [restock, setRestock] = useState(null); // {id, qty}
+
+  const filtered = items.filter((i) => {
+    const term = q.trim().toLowerCase();
+    return (
+      (cat === "All" || i.category === cat) &&
+      (i.name.toLowerCase().includes(term) || (i.code || "").toLowerCase().includes(term))
+    );
+  });
+
+  const save = () => {
+    const f = form;
+    if (!f.name.trim()) return notify("Item name is required");
+    const buy = +f.buyPrice, sell = +f.sellPrice, stock = +f.stock || 0, lowAt = +f.lowAt || 0;
+    if (!(sell > 0)) return notify("Selling price must be more than 0");
+    if (buy < 0 || sell < 0 || stock < 0) return notify("Prices and stock cannot be negative");
+    const rec = { ...f, name: f.name.trim(), code: (f.code || "").trim(), buyPrice: buy || 0, sellPrice: sell, stock, lowAt };
+    if (f.id) {
+      setItems(items.map((i) => (i.id === f.id ? rec : i)));
+      notify("Item updated");
+    } else {
+      setItems([...items, { ...rec, id: uid() }]);
+      notify("Item added to inventory");
+    }
+    setForm(null);
+  };
+
+  const doRestock = () => {
+    const qty = +restock.qty;
+    if (!(qty > 0)) return notify("Enter quantity to add");
+    setItems(items.map((i) => (i.id === restock.id ? { ...i, stock: i.stock + qty } : i)));
+    setRestock(null);
+    notify("Stock added");
+  };
+
+  return (
+    <div>
+      <Header title="Inventory" sub={items.length + " items in store"}>
+        <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
+      </Header>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <input className="input" placeholder="Find an item…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
+        <select className="input" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: 220 }}>
+          <option>All</option>
+          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+        </select>
+      </div>
+
+      <section style={S.panel}>
+        <table className="tbl">
+          <thead>
+            <tr><th>Item</th><th>Category</th><th style={{ textAlign: "right" }}>Buy</th><th style={{ textAlign: "right" }}>Sell</th><th style={{ textAlign: "right" }}>Margin</th><th style={{ textAlign: "right" }}>Stock</th><th></th></tr>
+          </thead>
+          <tbody>
+            {filtered.map((i) => (
+              <tr key={i.id}>
+                <td style={{ fontWeight: 600 }}>{i.name}</td>
+                <td style={{ color: "#677" }}>{i.category}</td>
+                <td style={{ textAlign: "right" }}>{INR(i.buyPrice)}</td>
+                <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(i.sellPrice)}</td>
+                <td style={{ textAlign: "right", color: "#1B5E43" }}>{i.buyPrice ? Math.round(((i.sellPrice - i.buyPrice) / i.buyPrice) * 100) + "%" : "—"}</td>
+                <td style={{ textAlign: "right", fontWeight: 700, color: i.stock <= i.lowAt ? "#C44536" : "#223" }}>
+                  {i.stock} {i.unit}{i.stock <= i.lowAt && " ⚠"}
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn small" onClick={() => setRestock({ id: i.id, name: i.name, qty: "" })}>Restock</button>{" "}
+                  <button className="btn small ghost" onClick={() => setForm({ ...i })}>Edit</button>{" "}
+                  <button className="btn small danger" aria-label={"Delete " + i.name} onClick={() => { if (confirm("Delete " + i.name + "?")) setItems(items.filter((x) => x.id !== i.id)); }}>✕</button>
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && <tr><td colSpan={7}><Empty text="No items found." /></td></tr>}
+          </tbody>
+        </table>
+      </section>
+
+      {form && (
+        <Modal title={form.id ? "Edit item" : "Add new item"} onClose={() => setForm(null)}>
+          <Field label="Item name"><input className="input" autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Amul Butter 100g" /></Field>
+          <Field label="Barcode / code (optional)"><input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Scan or type a barcode" /></Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Category">
+              <select className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Field label="Unit">
+              <select className="input" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
+                {UNITS.map((u) => <option key={u}>{u}</option>)}
+              </select>
+            </Field>
+            <Field label="Buying price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.buyPrice} onChange={(e) => setForm({ ...form, buyPrice: e.target.value })} /></Field>
+            <Field label="Selling price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.sellPrice} onChange={(e) => setForm({ ...form, sellPrice: e.target.value })} /></Field>
+            <Field label="Current stock"><input className="input" type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>
+            <Field label="Alert when stock below"><input className="input" type="number" min="0" value={form.lowAt} onChange={(e) => setForm({ ...form, lowAt: e.target.value })} /></Field>
+          </div>
+          <button className="btn primary big" style={{ width: "100%", marginTop: 14 }} onClick={save}>
+            {form.id ? "Save changes" : "Add item"}
+          </button>
+        </Modal>
+      )}
+
+      {restock && (
+        <Modal title={"Restock — " + restock.name} onClose={() => setRestock(null)}>
+          <Field label="Quantity to add">
+            <input className="input" type="number" min="0" autoFocus value={restock.qty} onChange={(e) => setRestock({ ...restock, qty: e.target.value })} />
+          </Field>
+          <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={doRestock}>Add stock</button>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Scan Photo (AI extraction) ----------
+function ScanTab({ items, setItems, setSales, notify }) {
+  const [mode, setMode] = useState("inventory"); // "inventory" | "sales"
+  const [img, setImg] = useState(null); // { data, mediaType, url }
+  const [busy, setBusy] = useState(false);
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const onFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      setImg({ data: r.result.split(",")[1], mediaType: f.type || "image/jpeg", url: r.result });
+      setRows(null); setErr(null);
+    };
+    r.onerror = () => setErr("Could not read that file. Please pick a different image.");
+    r.readAsDataURL(f);
+  };
+
+  const extract = async () => {
+    if (!img) return;
+    setBusy(true); setErr(null); setRows(null);
+    const prompt =
+      mode === "inventory"
+        ? `You are reading a photo for a grocery store inventory system. The photo may show a purchase bill/invoice, product packages on a shelf, or a handwritten list. Extract every distinct product. Respond with ONLY a raw JSON array, no markdown fences, no explanation: [{"name": string, "qty": number, "unit": one of ["pc","kg","g","L","ml","packet","dozen","box"], "buyPrice": number or null, "sellPrice": number or null}]. Prices are in INR per unit. If quantity is unknown use 1. Clean up item names (e.g. "Tata Salt 1kg").`
+        : `This photo shows sales records from an Indian grocery (kirana) shop notebook — handwritten or printed. Each line is a sold item. Text may be in English, Hindi, or Hinglish. Respond with ONLY a raw JSON array, no markdown fences, no explanation: [{"name": string, "qty": number, "amount": number}] where amount is the total INR for that line. If qty is unknown use 1. Translate item names to English where obvious.`;
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } },
+              { type: "text", text: prompt },
+            ],
+          }],
+        }),
+      });
+      if (!response.ok) {
+        // API/auth/CORS errors funnel here instead of masquerading as a bad photo.
+        let detail = "";
+        try {
+          const errBody = await response.json();
+          detail = errBody?.error?.message || "";
+        } catch { /* response had no JSON body */ }
+        throw new Error(`api ${response.status}${detail ? ": " + detail : ""}`);
+      }
+      const data = await response.json();
+      const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+      const clean = text.replace(/```json|```/g, "").trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(clean);
+      } catch {
+        throw new Error("The AI response was not valid JSON.");
+      }
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("nothing found");
+      setRows(parsed.map((r) => ({
+        name: String(r.name || "").trim(),
+        qty: +r.qty || 1,
+        unit: UNITS.includes(r.unit) ? r.unit : "pc",
+        buyPrice: r.buyPrice != null ? +r.buyPrice : "",
+        sellPrice: r.sellPrice != null ? +r.sellPrice : "",
+        amount: r.amount != null ? +r.amount : "",
+      })).filter((r) => r.name));
+    } catch (e) {
+      // Distinguish "couldn't reach/authorize the API" from "photo was unreadable".
+      const isApiError = /^api \d/.test(e?.message || "") || e?.name === "TypeError";
+      setErr(
+        isApiError
+          ? "Couldn't reach the AI service. This feature needs a backend proxy with an API key — it can't call Anthropic directly from the browser. (" + (e?.message || "network error") + ")"
+          : "Could not read items from this photo. Try a clearer, well-lit photo with text facing the camera."
+      );
+    }
+    setBusy(false);
+  };
+
+  const edit = (i, k, v) => setRows(rows.map((r, x) => (x === i ? { ...r, [k]: v } : r)));
+  const drop = (i) => setRows(rows.filter((_, x) => x !== i));
+
+  // Collapse duplicate rows (same name) into one entry so quantities sum instead
+  // of one row clobbering another. Returns a Map keyed by lowercased name.
+  const aggregateRows = () => {
+    const agg = new Map();
+    rows.forEach((r) => {
+      const key = r.name.trim().toLowerCase();
+      if (!key) return;
+      const buy = +r.buyPrice || 0, sell = +r.sellPrice || 0, qty = +r.qty || 0, amount = +r.amount || 0;
+      const prev = agg.get(key);
+      if (prev) {
+        prev.qty += qty; prev.amount += amount;
+        if (buy) prev.buy = buy;
+        if (sell) prev.sell = sell;
+      } else {
+        agg.set(key, { name: r.name.trim(), unit: r.unit, qty, amount, buy, sell });
+      }
+    });
+    return agg;
+  };
+
+  const commitInventory = () => {
+    const agg = aggregateRows();
+    let added = 0, updated = 0;
+    // Map to NEW objects (never mutate existing state items in place).
+    const next = items.map((i) => {
+      const a = agg.get(i.name.toLowerCase());
+      if (!a) return i;
+      agg.delete(i.name.toLowerCase());
+      updated++;
+      return { ...i, stock: i.stock + a.qty, buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
+    });
+    agg.forEach((a) => {
+      const sell = a.sell || (a.buy ? Math.round(a.buy * 1.15) : 0);
+      next.push({ id: uid(), name: a.name, code: "", category: "Other", unit: a.unit, buyPrice: a.buy, sellPrice: sell, stock: a.qty, lowAt: 5 });
+      added++;
+    });
+    setItems(next);
+    setRows(null); setImg(null);
+    notify(`Inventory updated — ${added} new, ${updated} restocked`);
+  };
+
+  const commitSales = () => {
+    const agg = aggregateRows();
+    let profit = 0, total = 0;
+    const lines = [...agg.values()].map((a) => {
+      total += a.amount;
+      const ex = items.find((i) => i.name.toLowerCase() === a.name.toLowerCase());
+      if (ex) profit += a.amount - ex.buyPrice * a.qty;
+      return { name: a.name, qty: a.qty, unit: ex?.unit || "pc", price: a.qty ? money(a.amount / a.qty) : a.amount, amount: money(a.amount) };
+    });
+    total = money(total); profit = money(profit);
+    const now = new Date();
+    setSales((s) => [...s, {
+      id: uid(), date: todayStr(),
+      time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + " (notebook)",
+      lines, total, profit,
+    }]);
+    setItems((its) => its.map((i) => {
+      const a = agg.get(i.name.toLowerCase());
+      return a ? { ...i, stock: Math.max(0, i.stock - a.qty) } : i;
+    }));
+    setRows(null); setImg(null);
+    notify("Notebook sales recorded — " + INR(total));
+  };
+
+  return (
+    <div>
+      <Header title="Scan Photo" sub="Upload a photo — AI reads the items for you" />
+      <div style={{ background: "#FFF4E0", border: "1px solid #F0D9A8", color: "#7A5A1E", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
+        ⚠ <b>Needs a backend.</b> This reads the photo with the Anthropic API, which cannot be called directly from the browser (no API key, CORS). It will not work until a server proxy is added — see the project README. Everything else in the app works offline.
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <button className={"btn " + (mode === "inventory" ? "primary" : "")} onClick={() => { setMode("inventory"); setRows(null); }}>
+          ➕ Add to inventory (purchase bill / products)
+        </button>
+        <button className={"btn " + (mode === "sales" ? "primary" : "")} onClick={() => { setMode("sales"); setRows(null); }}>
+          📓 Record sold items (notebook page)
+        </button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16 }}>
+        <section style={S.panel}>
+          <div style={S.panelHead}>1 · Photo</div>
+          <label className="btn" style={{ display: "block", textAlign: "center", padding: "14px", cursor: "pointer" }}>
+            {img ? "Choose a different photo" : "📷 Take / choose photo"}
+            <input type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: "none" }} />
+          </label>
+          {img && (
+            <>
+              <img src={img.url} alt="uploaded" style={{ width: "100%", borderRadius: 10, marginTop: 12, border: "1px solid #E2EAE3" }} />
+              <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={extract} disabled={busy}>
+                {busy ? "Reading photo…" : mode === "inventory" ? "Extract items for inventory" : "Extract sold items"}
+              </button>
+            </>
+          )}
+          {err && <div style={{ color: "#C44536", fontSize: 13, marginTop: 10 }}>{err}</div>}
+        </section>
+
+        <section style={S.panel}>
+          <div style={S.panelHead}>2 · Check &amp; confirm</div>
+          {!rows ? (
+            <Empty text={busy ? "AI is reading the photo…" : "Extracted items will appear here. You can correct anything before saving."} />
+          ) : (
+            <>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>Item</th><th style={{ width: 64 }}>Qty</th>
+                    {mode === "inventory" ? (<><th style={{ width: 80 }}>Buy ₹</th><th style={{ width: 80 }}>Sell ₹</th></>) : (<th style={{ width: 90 }}>Amount ₹</th>)}
+                    <th style={{ width: 30 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={i}>
+                      <td><input className="input" style={{ padding: "6px 8px" }} value={r.name} onChange={(e) => edit(i, "name", e.target.value)} /></td>
+                      <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" value={r.qty} onChange={(e) => edit(i, "qty", +e.target.value)} /></td>
+                      {mode === "inventory" ? (
+                        <>
+                          <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.buyPrice} onChange={(e) => edit(i, "buyPrice", e.target.value)} /></td>
+                          <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.sellPrice} onChange={(e) => edit(i, "sellPrice", e.target.value)} /></td>
+                        </>
+                      ) : (
+                        <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.amount} onChange={(e) => edit(i, "amount", e.target.value)} /></td>
+                      )}
+                      <td><button className="btn small danger" aria-label="Remove row" onClick={() => drop(i)}>✕</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ fontSize: 12, color: "#6B7E74", margin: "10px 0" }}>
+                {mode === "inventory"
+                  ? "Items matching existing names will be restocked; new names create new items (blank sell price = buy +15%)."
+                  : "Matched items also reduce stock automatically."}
+              </div>
+              <button className="btn primary big" style={{ width: "100%" }} onClick={mode === "inventory" ? commitInventory : commitSales}>
+                {mode === "inventory" ? `Add ${rows.length} items to inventory` : `Record ${rows.length} sold items`}
+              </button>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Sales history ----------
+function SalesHistory({ sales }) {
+  const [open, setOpen] = useState(null);
+  const byDate = useMemo(() => {
+    const m = {};
+    [...sales].reverse().forEach((s) => { (m[s.date] = m[s.date] || []).push(s); });
+    return Object.entries(m);
+  }, [sales]);
+
+  return (
+    <div>
+      <Header title="Sales History" sub={sales.length + " bills recorded"} />
+      {sales.length === 0 && <section style={S.panel}><Empty text="No sales yet. Bills will appear here after you complete a sale." /></section>}
+      {byDate.map(([date, list]) => (
+        <section key={date} style={{ ...S.panel, marginBottom: 14 }}>
+          <div style={S.panelHead}>
+            {new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" })}
+            <span style={{ marginLeft: "auto", fontWeight: 800 }}>{INR(list.reduce((a, s) => a + s.total, 0))}</span>
+          </div>
+          {list.map((s) => (
+            <div key={s.id}>
+              <div style={{ ...S.row, cursor: "pointer" }} onClick={() => setOpen(open === s.id ? null : s.id)}>
+                <span>{s.time} · {s.lines.length} item{s.lines.length > 1 ? "s" : ""}</span>
+                <span><b>{INR(s.total)}</b> <span style={{ color: "#1B5E43", fontSize: 12 }}>(+{INR(s.profit)})</span> {open === s.id ? "▾" : "▸"}</span>
+              </div>
+              {open === s.id && (
+                <div style={{ background: "#F4F7F4", borderRadius: 8, padding: "8px 12px", margin: "0 0 8px" }}>
+                  {s.lines.map((l, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
+                      <span>{l.name} × {l.qty}</span><span>{INR(l.amount)}</span>
+                    </div>
+                  ))}
+                  <button className="btn small" style={{ marginTop: 8 }} onClick={() => printReceipt(s)}>🖨 Print receipt</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// ---------- Finance ----------
+function Finance({ sales, expenses, setExpenses, notify }) {
+  const [exp, setExp] = useState({ desc: "", amount: "" });
+  const month = todayStr().slice(0, 7);
+  const mSales = sales.filter((s) => s.date.startsWith(month));
+  const mExp = expenses.filter((e) => e.date.startsWith(month));
+  const revenue = money(mSales.reduce((a, s) => a + s.total, 0));
+  const grossProfit = money(mSales.reduce((a, s) => a + s.profit, 0));
+  const expTotal = money(mExp.reduce((a, e) => a + e.amount, 0));
+
+  // last 7 days revenue — use local dateStr to match how sales are stored.
+  const days = [...Array(7)].map((_, k) => {
+    const d = new Date(); d.setDate(d.getDate() - (6 - k));
+    const ds = dateStr(d);
+    return { label: d.toLocaleDateString("en-IN", { weekday: "short" }), rev: sales.filter((s) => s.date === ds).reduce((a, s) => a + s.total, 0) };
+  });
+  const max = Math.max(...days.map((d) => d.rev), 1);
+
+  const addExp = () => {
+    if (!exp.desc.trim() || !(+exp.amount > 0)) return notify("Enter description and amount");
+    setExpenses([...expenses, { id: uid(), date: todayStr(), desc: exp.desc.trim(), amount: +exp.amount }]);
+    setExp({ desc: "", amount: "" });
+    notify("Expense recorded");
+  };
+
+  return (
+    <div>
+      <Header title="Finance" sub={"Month of " + new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" })} />
+      <div style={S.cards}>
+        <Card label="Revenue (month)" value={INR(revenue)} sub={mSales.length + " bills"} />
+        <Card label="Gross profit" value={INR(grossProfit)} sub="sales − item cost" />
+        <Card label="Expenses" value={INR(expTotal)} sub="rent, electricity, etc." />
+        <Card label="Net profit" value={INR(money(grossProfit - expTotal))} sub="gross − expenses" accent />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
+        <section style={S.panel}>
+          <div style={S.panelHead}>Last 7 days — revenue</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, height: 150, padding: "10px 4px 0" }}>
+            {days.map((d, i) => (
+              <div key={i} style={{ flex: 1, textAlign: "center" }}>
+                <div style={{ fontSize: 10.5, color: "#567", marginBottom: 3 }}>{d.rev ? INR(d.rev) : ""}</div>
+                <div style={{ height: Math.max(4, (d.rev / max) * 100), background: i === 6 ? "#1B5E43" : "#BBD4C6", borderRadius: "4px 4px 0 0" }} />
+                <div style={{ fontSize: 11, color: "#678", marginTop: 4 }}>{d.label}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section style={S.panel}>
+          <div style={S.panelHead}>Add expense</div>
+          <Field label="Description"><input className="input" value={exp.desc} onChange={(e) => setExp({ ...exp, desc: e.target.value })} placeholder="e.g. Electricity bill" /></Field>
+          <Field label="Amount (₹)"><input className="input" type="number" min="0" step="0.01" value={exp.amount} onChange={(e) => setExp({ ...exp, amount: e.target.value })} /></Field>
+          <button className="btn primary" style={{ width: "100%", marginTop: 8 }} onClick={addExp}>Record expense</button>
+          <div style={{ marginTop: 14 }}>
+            {[...mExp].reverse().slice(0, 6).map((e) => (
+              <div key={e.id} style={S.row}><span>{e.desc}</span><b>{INR(e.amount)}</b></div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+// ---------- small components ----------
+const Header = ({ title, sub, children }) => (
+  <div style={{ display: "flex", alignItems: "flex-end", marginBottom: 18, gap: 12 }}>
+    <div>
+      <h1 style={{ margin: 0, fontSize: 24, letterSpacing: "-0.03em" }}>{title}</h1>
+      {sub && <div style={{ color: "#6B7E74", fontSize: 13, marginTop: 2 }}>{sub}</div>}
+    </div>
+    <div style={{ marginLeft: "auto" }}>{children}</div>
+  </div>
+);
+
+const Card = ({ label, value, sub, accent }) => (
+  <div style={{ ...S.card, ...(accent ? { background: "#1B5E43", color: "#fff" } : {}) }}>
+    <div style={{ fontSize: 11.5, textTransform: "uppercase", letterSpacing: "0.07em", color: accent ? "#A8CDBA" : "#7A8C81" }}>{label}</div>
+    <div style={{ fontSize: 24, fontWeight: 800, margin: "6px 0 2px", fontVariantNumeric: "tabular-nums" }}>{value}</div>
+    <div style={{ fontSize: 12, color: accent ? "#C8E2D4" : "#8A9C90" }}>{sub}</div>
+  </div>
+);
+
+const Field = ({ label, children }) => (
+  <label style={{ display: "block", marginBottom: 10 }}>
+    <div style={{ fontSize: 12, fontWeight: 600, color: "#465", marginBottom: 4 }}>{label}</div>
+    {children}
+  </label>
+);
+
+const Empty = ({ text, children }) => (
+  <div style={{ padding: "22px 10px", textAlign: "center", color: "#8A9", fontSize: 13 }}>
+    {text}
+    {children && <div style={{ marginTop: 10 }}>{children}</div>}
+  </div>
+);
+
+function Modal({ title, children, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div style={S.overlay} onClick={onClose} role="dialog" aria-modal="true" aria-label={title}>
+      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+          <h2 style={{ margin: 0, fontSize: 17 }}>{title}</h2>
+          <button className="btn ghost small" style={{ marginLeft: "auto" }} aria-label="Close dialog" onClick={onClose}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ---------- styles ----------
+const S = {
+  app: { display: "flex", minHeight: "100vh", background: "#EFF3EE", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", color: "#1E2421" },
+  nav: { width: 210, background: "#10331F", color: "#E6F0E9", display: "flex", flexDirection: "column", gap: 4, padding: "16px 10px", position: "sticky", top: 0, height: "100vh", boxSizing: "border-box" },
+  logo: { display: "flex", gap: 10, alignItems: "center", padding: "4px 8px 18px" },
+  logoMark: { width: 38, height: 38, borderRadius: 10, background: "#E8A33D", color: "#10331F", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 17 },
+  main: { flex: 1, padding: "26px 30px", maxWidth: 1100 },
+  cards: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 },
+  card: { background: "#fff", borderRadius: 14, padding: "16px 18px", border: "1px solid #E2EAE3" },
+  panel: { background: "#fff", borderRadius: 14, padding: 16, border: "1px solid #E2EAE3" },
+  panelHead: { fontWeight: 800, fontSize: 13.5, textTransform: "uppercase", letterSpacing: "0.05em", color: "#3A5547", display: "flex", alignItems: "center", marginBottom: 10 },
+  row: { display: "flex", justifyContent: "space-between", padding: "8px 2px", borderBottom: "1px dashed #E5ECE6", fontSize: 13.5 },
+  receipt: { background: "#FFFDF6", borderRadius: 4, padding: "18px 16px", border: "1px solid #E8E2CF", boxShadow: "0 2px 10px rgba(40,60,40,.07)", alignSelf: "start", backgroundImage: "repeating-linear-gradient(transparent, transparent 27px, rgba(180,170,140,.12) 28px)" },
+  receiptHead: { textAlign: "center", fontWeight: 800, letterSpacing: "0.25em", fontSize: 12, color: "#6B6347", borderBottom: "2px dashed #D8D0B8", paddingBottom: 10, marginBottom: 8 },
+  rcptLine: { display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderBottom: "1px dotted #E0D9C4" },
+  rcptTotal: { display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 18, paddingTop: 12, marginTop: 6, borderTop: "2px dashed #C9BF9F" },
+  badge: { background: "#C44536", color: "#fff", fontSize: 10.5, fontWeight: 800, borderRadius: 9, padding: "1px 7px", marginLeft: 8 },
+  toast: { position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: "#10331F", color: "#fff", padding: "10px 20px", borderRadius: 10, fontSize: 13.5, boxShadow: "0 6px 20px rgba(0,0,0,.25)", zIndex: 60 },
+  overlay: { position: "fixed", inset: 0, background: "rgba(15,30,20,.45)", display: "grid", placeItems: "center", zIndex: 50 },
+  modal: { background: "#fff", borderRadius: 16, padding: 20, width: "min(480px, 92vw)", maxHeight: "86vh", overflow: "auto" },
+};
+
+const CSS = `
+  .navbtn { display:flex; align-items:center; gap:6px; width:100%; text-align:left; background:none; border:none; color:#BCD2C4; padding:10px 12px; border-radius:9px; font-size:13.5px; font-weight:600; cursor:pointer; position:relative; }
+  .navbtn:hover { background:#1A4A2E; color:#fff; }
+  .navbtn.active { background:#1B5E43; color:#fff; }
+  .input { width:100%; box-sizing:border-box; padding:10px 12px; border:1.5px solid #D5E0D6; border-radius:9px; font-size:14px; background:#fff; outline:none; font-family:inherit; }
+  .input:focus { border-color:#1B5E43; box-shadow:0 0 0 3px rgba(27,94,67,.12); }
+  .btn { border:none; border-radius:9px; padding:9px 16px; font-size:13.5px; font-weight:700; cursor:pointer; background:#E4ECE5; color:#23402F; font-family:inherit; }
+  .btn:hover { filter:brightness(.96); }
+  .btn.primary { background:#1B5E43; color:#fff; }
+  .btn.big { padding:13px 18px; font-size:15px; }
+  .btn.ghost { background:transparent; border:1.5px solid #CFDCD1; }
+  .btn.small { padding:5px 10px; font-size:12px; }
+  .btn.danger { background:#FBEAE7; color:#C44536; }
+  .pick { text-align:left; background:#F6FAF6; border:1.5px solid #DDE8DE; border-radius:11px; padding:10px 12px; cursor:pointer; font-family:inherit; }
+  .pick:hover:not(:disabled) { border-color:#1B5E43; background:#fff; }
+  .pick:disabled { opacity:.45; cursor:not-allowed; }
+  .qty { width:26px; height:26px; border-radius:7px; border:1.5px solid #D0C7AB; background:#fff; font-size:15px; font-weight:700; cursor:pointer; line-height:1; }
+  .tbl { width:100%; border-collapse:collapse; font-size:13.5px; }
+  .tbl th { text-align:left; font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:#7A8C81; padding:6px 8px; border-bottom:2px solid #E2EAE3; }
+  .tbl td { padding:9px 8px; border-bottom:1px solid #EEF3EE; }
+  .tbl tr:hover td { background:#F7FAF7; }
+  @media (max-width: 820px) {
+    .app { flex-direction:column !important; }
+    .nav { width:auto !important; height:auto !important; position:static !important;
+           flex-direction:row !important; flex-wrap:wrap !important; gap:4px !important; }
+    .nav .navbtn { width:auto !important; }
+    .main { padding:16px !important; max-width:none !important; }
+    /* inline grids are 2- or 4-column; collapse them all on small screens */
+    [style*="grid-template-columns"] { grid-template-columns:1fr !important; }
+    /* let wide tables scroll horizontally instead of overflowing the panel */
+    .tbl { display:block; overflow-x:auto; white-space:nowrap; }
+  }
+`;
