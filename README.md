@@ -1,8 +1,12 @@
-# Dukaan Manager — Grocery POS & Inventory
+# Prakash Super Mart — POS & Inventory
 
-A single-screen point-of-sale and inventory app for a small Indian grocery (kirana)
-store, built in React. Originally a Claude artifact (`grocery-store-manager.jsx`); this
-repo wraps it in a runnable Vite project.
+A single-screen point-of-sale, inventory, and accounts app for **Prakash Super Mart**,
+Shop No. 16, Nancy Hill View, Baner, Pune 411021. Built in React, runs fully in the
+browser (Vite).
+
+> The store name and address/locality are real (Nancy Hill View is a residential
+> complex in Baner, Pune 411021). A storefront photo and phone number were **not**
+> verifiably sourced, so they are intentionally omitted rather than invented.
 
 ## Run it
 
@@ -11,53 +15,45 @@ npm install
 npm run dev      # http://localhost:5173
 ```
 
-Other scripts:
-
-```bash
-npm run build    # production build to dist/
-npm run preview  # serve the production build
-npm run lint     # ESLint
-npm run format   # Prettier (writes)
-```
+Other scripts: `npm run build`, `npm run preview`, `npm run lint`, `npm run format`.
 
 ## How data is stored
 
-The original artifact expected a sandbox `window.storage` API. In this project,
-[`src/main.jsx`](src/main.jsx) shims that with **`localStorage`**, so all data lives
-**in your browser on this device only**. There is no server and no cross-device sync.
+Data lives in your browser via `localStorage` (shimmed in [`src/main.jsx`](src/main.jsx)).
+There is no server and no cross-device sync.
 
-> **Back up regularly.** Clearing browser data wipes everything. Use the
-> **⬇ Backup** button in the sidebar to download a JSON file, and **⬆ Restore** to
-> load it back (on this or another device). A toast warns you if a save ever fails
-> (e.g. storage full).
+> **Back up regularly** from the sidebar — **⬇ JSON** or **⬇ XLSX**, and **⬆ Restore**
+> accepts either format. A toast warns you if a save ever fails (e.g. storage full).
 
 ## Features
 
-- **Dashboard** — today's sales/profit, month revenue, stock value, low-stock + recent bills.
-- **Billing (POS)** — search or **scan a barcode** (type/scan then press **Enter** to add
-  the top match), live cart, complete sale, and **🖨 print the last bill**.
-- **Inventory** — add/edit/restock items, optional **barcode/code** per item, low-stock alerts.
-- **Sales History** — bills grouped by day; expand any bill and **reprint** its receipt.
-- **Finance** — monthly revenue/profit/expenses, last-7-days chart, expense log.
-- **Scan Photo** — ⚠️ **does not work in this setup** (see below).
+- **Dashboard** — pick any day to view its sales/profit; 14-day sales trend chart;
+  low-stock and recent-bills panels.
+- **Billing (POS)** — search or scan a barcode (Enter adds top match), live cart,
+  back-date a bill, complete sale, and print the receipt.
+- **Data Import** — import a **txt / csv / tsv / xls / xlsx / pdf / json** file *or paste
+  raw text*; columns are auto-detected; review/add/edit/delete rows; then submit as a
+  **sale** or **add to inventory**. (PDF text extraction is best-effort.)
+- **Inventory** — add/edit/restock items, optional barcode/code, "Added on" dates,
+  low-stock alerts.
+- **Sales History** — date-range filter; change a bill's date; delete a bill (restores
+  stock); reprint receipts.
+- **Finance** — choose a period (this/last month, last 7/30 days, this year, or a custom
+  range) and see revenue/profit/expenses with charts: revenue & profit trend, expense
+  breakdown (pie), revenue vs expenses, and top items by revenue.
+- **Add Expense** — its own page to record and review expenses by month.
+- **Activity Log** — every sale, inventory change, expense, import, and backup is logged;
+  filter by day/type.
 
-## ⚠️ The "Scan Photo" tab needs a backend
+## Libraries
 
-That feature calls `https://api.anthropic.com/v1/messages` directly from the browser.
-That cannot work client-side: there is no API key and the browser blocks the call (CORS),
-and **an API key must never be shipped in browser code**. To enable it, add a small
-server proxy that holds the key and forwards requests, then point the `fetch` in
-[`src/grocery-store-manager.jsx`](src/grocery-store-manager.jsx) at that proxy. The tab
-shows a banner explaining this; everything else works fully offline.
+- **recharts** — charts.
+- **xlsx (SheetJS)** — parsing csv/xls/xlsx imports and building/reading XLSX backups.
+- **pdfjs-dist** — extracting text from PDF imports (lazy-loaded into its own chunk).
 
-## Notes on robustness
+## Notes
 
-This project includes fixes layered on top of the original artifact:
-
-- Local-timezone dates (sales no longer mis-file under the previous day in early hours).
-- Currency math rounded to paise to avoid floating-point drift.
-- Backup / restore + a visible warning when a save fails.
-- Duplicate rows in photo-scan results are aggregated, not clobbered.
-- An error boundary so a render crash shows a recoverable screen, not a blank page.
-- Barcode/keyboard billing, printable receipts, `min=0` inputs, and a mobile layout.
-- Accessibility: aria-labels on icon buttons and Esc-to-close dialogs.
+- Built on top of an earlier artifact; includes fixes for local-timezone dates,
+  paise-rounded money, an error boundary, accessibility, and a mobile layout.
+- The main bundle is large (charts + spreadsheet libs). For production you'd code-split
+  these; acceptable for a local single-shop tool.

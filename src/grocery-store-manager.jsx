@@ -1,4 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import {
+  ResponsiveContainer, AreaChart, Area, BarChart, Bar,
+  XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
+} from "recharts";
+import { parseFile, parseRawText } from "./lib/parse.js";
+import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 
 // ---------- helpers ----------
 const INR = (n) =>
@@ -33,7 +39,8 @@ function printReceipt(sale) {
     .tot td{border-top:1px dashed #000;font-weight:bold;padding-top:4px}
     .ft{text-align:center;font-size:11px;margin-top:8px;border-top:1px dashed #000;padding-top:6px}</style>
     </head><body>
-    <h2>Dukaan Manager</h2>
+    <h2>${escapeHtml(STORE.name)}</h2>
+    <div class="meta">${escapeHtml(STORE.address)}</div>
     <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
     <table>${rows}
     <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
@@ -180,7 +187,16 @@ const SEED_ITEMS = [
 
 const STORAGE_KEY = "kirana-data-v2";
 // Categories of activity recorded in the global Activity Log.
-const LOG_TYPES = ["sale", "inventory", "expense", "scan", "backup"];
+const LOG_TYPES = ["sale", "inventory", "expense", "import", "backup"];
+
+// Store identity. Address/locality verified (Nancy Hill View is a real complex in
+// Baner, Pune 411021); phone left blank rather than invented.
+const STORE = {
+  name: "Prakash Super Mart",
+  tagline: "Groceries & Daily Needs",
+  address: "Shop No. 16, Nancy Hill View, Baner, Pune 411021",
+  phone: "",
+};
 
 // ---------- main app ----------
 export default function GroceryStoreManager() {
@@ -252,43 +268,39 @@ export default function GroceryStoreManager() {
     );
   };
 
-  const exportData = () => {
-    const blob = new Blob(
-      [JSON.stringify({ items, sales, expenses, logs, exportedAt: new Date().toISOString() }, null, 2)],
-      { type: "application/json" }
-    );
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dukaan-backup-${todayStr()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    addLog("backup", "Backup downloaded");
-    notify("Backup downloaded");
+  const exportData = (fmt) => {
+    const data = { items, sales, expenses, logs };
+    const fname = `prakash-supermart-${todayStr()}.${fmt === "xlsx" ? "xlsx" : "json"}`;
+    try {
+      if (fmt === "xlsx") exportXlsx(data, fname);
+      else exportJson(data, fname);
+      addLog("backup", `Backup downloaded (${fmt.toUpperCase()})`);
+      notify(`Backup downloaded (${fmt.toUpperCase()})`);
+    } catch (err) {
+      console.error("backup failed", err);
+      notify("⚠ Could not create the backup file.");
+    }
   };
 
-  const importData = (e) => {
+  const importData = async (e) => {
     const f = e.target.files?.[0];
     e.target.value = ""; // allow re-importing the same file later
     if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      try {
-        const d = JSON.parse(r.result);
-        if (!d || !Array.isArray(d.items)) throw new Error("bad file");
-        if (!confirm("Restore this backup? It will REPLACE all current data on this device.")) return;
-        setItems(d.items);
-        setSales(Array.isArray(d.sales) ? d.sales : []);
-        setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
-        setLogs(Array.isArray(d.logs) ? d.logs : []);
-        addLog("backup", "Backup restored from file");
-        notify("Backup restored");
-      } catch {
-        notify("⚠ That file is not a valid backup.");
-      }
-    };
-    r.onerror = () => notify("⚠ Could not read that file.");
-    r.readAsText(f);
+    try {
+      const ext = (f.name.split(".").pop() || "").toLowerCase();
+      const d = ext === "xlsx" || ext === "xls" ? await importXlsx(f) : JSON.parse(await f.text());
+      if (!d || !Array.isArray(d.items)) throw new Error("bad file");
+      if (!confirm("Restore this backup? It will REPLACE all current data on this device.")) return;
+      setItems(d.items);
+      setSales(Array.isArray(d.sales) ? d.sales : []);
+      setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
+      setLogs(Array.isArray(d.logs) ? d.logs : []);
+      addLog("backup", `Backup restored (${ext.toUpperCase()})`);
+      notify("Backup restored");
+    } catch (err) {
+      console.error("restore failed", err);
+      notify("⚠ That file is not a valid backup.");
+    }
   };
 
   const lowStock = items.filter((i) => i.stock <= i.lowAt);
@@ -299,19 +311,20 @@ export default function GroceryStoreManager() {
       {/* sidebar */}
       <nav className="nav" style={S.nav}>
         <div style={S.logo}>
-          <div style={S.logoMark}>दु</div>
+          <div style={S.logoMark}>P</div>
           <div>
-            <div style={{ fontWeight: 800, fontSize: 15, letterSpacing: "-0.02em" }}>Dukaan Manager</div>
-            <div style={{ fontSize: 11, color: "#9DB5A8" }}>Grocery POS &amp; Inventory</div>
+            <div style={{ fontWeight: 800, fontSize: 14.5, letterSpacing: "-0.02em" }}>{STORE.name}</div>
+            <div style={{ fontSize: 10.5, color: "#9DB5A8", lineHeight: 1.3 }}>{STORE.address}</div>
           </div>
         </div>
         {[
           ["dashboard", "⌂", "Dashboard"],
           ["billing", "₹", "Billing (POS)"],
+          ["raw", "⇪", "Data Import"],
           ["inventory", "▦", "Inventory"],
-          ["scan", "✦", "Scan Photo"],
           ["sales", "⊟", "Sales History"],
           ["finance", "∑", "Finance"],
+          ["expense", "⊝", "Add Expense"],
           ["logs", "❑", "Activity Log"],
         ].map(([k, ic, label]) => (
           <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
@@ -321,14 +334,18 @@ export default function GroceryStoreManager() {
             )}
           </button>
         ))}
-        <div style={{ marginTop: "auto", display: "flex", gap: 6, padding: "8px 8px 4px" }}>
-          <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={exportData}>⬇ Backup</button>
-          <label className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center", cursor: "pointer" }}>
-            ⬆ Restore
-            <input type="file" accept="application/json" onChange={importData} style={{ display: "none" }} />
+        <div style={{ marginTop: "auto", padding: "8px 8px 4px" }}>
+          <div style={{ fontSize: 10.5, color: "#6E8A7C", textTransform: "uppercase", letterSpacing: ".06em", padding: "0 6px 4px" }}>Backup</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={() => exportData("json")}>⬇ JSON</button>
+            <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={() => exportData("xlsx")}>⬇ XLSX</button>
+          </div>
+          <label className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center", cursor: "pointer", marginTop: 6 }}>
+            ⬆ Restore (JSON / XLSX)
+            <input type="file" accept=".json,.xlsx,.xls,application/json" onChange={importData} style={{ display: "none" }} />
           </label>
         </div>
-        <div style={{ fontSize: 11, color: "#6E8A7C", padding: "0 14px 8px" }}>
+        <div style={{ fontSize: 11, color: "#6E8A7C", padding: "6px 14px 8px" }}>
           Saved on this device. Back up regularly.
         </div>
       </nav>
@@ -341,16 +358,20 @@ export default function GroceryStoreManager() {
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         ) : tab === "billing" ? (
           <Billing items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
+        ) : tab === "raw" ? (
+          <RawData items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
           <Inventory items={items} setItems={setItems} notify={notify} log={addLog} />
-        ) : tab === "scan" ? (
-          <ScanTab items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
           <SalesHistory sales={sales} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
+        ) : tab === "finance" ? (
+          <Finance sales={sales} expenses={expenses} />
+        ) : tab === "expense" ? (
+          <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "logs" ? (
           <Logs logs={logs} setLogs={setLogs} notify={notify} />
         ) : (
-          <Finance sales={sales} expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
+          <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         )}
       </main>
 
@@ -371,6 +392,10 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
   const monthRev = money(sales.filter((s) => s.date.startsWith(month)).reduce((a, s) => a + s.total, 0));
   const monthName = new Date(date + "T00:00").toLocaleDateString("en-IN", { month: "long" });
   const niceDate = new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const trend = useMemo(() => {
+    const d = new Date(); d.setDate(d.getDate() - 13);
+    return buildSeries(sales, [], dateStr(d), todayStr());
+  }, [sales]);
 
   return (
     <div>
@@ -385,6 +410,21 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
         <Card label={isToday ? "Today's profit" : "Profit (this day)"} value={INR(profit)} sub="after item cost" accent />
         <Card label={monthName + " revenue"} value={INR(monthRev)} sub="month to date" />
         <Card label="Stock value" value={INR(stockValue)} sub={items.length + " items (at cost)"} />
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Sales — last 14 days" height={200}>
+          <AreaChart data={trend} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+            <defs>
+              <linearGradient id="gDash" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1B5E43" stopOpacity={0.35} /><stop offset="100%" stopColor="#1B5E43" stopOpacity={0.03} /></linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Area type="monotone" dataKey="revenue" name="Revenue" stroke="#1B5E43" strokeWidth={2} fill="url(#gDash)" />
+          </AreaChart>
+        </ChartCard>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
@@ -703,90 +743,56 @@ function Inventory({ items, setItems, notify, log }) {
   );
 }
 
-// ---------- Scan Photo (AI extraction) ----------
-function ScanTab({ items, setItems, setSales, notify, log }) {
+// ---------- Raw Data Record (file import / paste) ----------
+const RAW_ACCEPT = ".txt,.csv,.tsv,.xls,.xlsx,.pdf,.json";
+function RawData({ items, setItems, setSales, notify, log }) {
   const [mode, setMode] = useState("inventory"); // "inventory" | "sales"
-  const [img, setImg] = useState(null); // { data, mediaType, url }
-  const [busy, setBusy] = useState(false);
   const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [raw, setRaw] = useState("");
+  const [source, setSource] = useState("");
+  const [saleDate, setSaleDate] = useState(todayStr());
 
-  const onFile = (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = () => {
-      setImg({ data: r.result.split(",")[1], mediaType: f.type || "image/jpeg", url: r.result });
-      setRows(null); setErr(null);
-    };
-    r.onerror = () => setErr("Could not read that file. Please pick a different image.");
-    r.readAsDataURL(f);
+  const loadRows = (parsed, srcLabel) => {
+    if (!parsed || parsed.length === 0) {
+      setErr("No rows found. Make sure the data has item names and numbers — or add rows manually below.");
+      return;
+    }
+    setErr(null);
+    setRows(parsed);
+    setSource(srcLabel);
+    notify(`${parsed.length} row(s) loaded — review, edit, then submit`);
   };
 
-  const extract = async () => {
-    if (!img) return;
-    setBusy(true); setErr(null); setRows(null);
-    const prompt =
-      mode === "inventory"
-        ? `You are reading a photo for a grocery store inventory system. The photo may show a purchase bill/invoice, product packages on a shelf, or a handwritten list. Extract every distinct product. Respond with ONLY a raw JSON array, no markdown fences, no explanation: [{"name": string, "qty": number, "unit": one of ["pc","kg","g","L","ml","packet","dozen","box"], "buyPrice": number or null, "sellPrice": number or null}]. Prices are in INR per unit. If quantity is unknown use 1. Clean up item names (e.g. "Tata Salt 1kg").`
-        : `This photo shows sales records from an Indian grocery (kirana) shop notebook — handwritten or printed. Each line is a sold item. Text may be in English, Hindi, or Hinglish. Respond with ONLY a raw JSON array, no markdown fences, no explanation: [{"name": string, "qty": number, "amount": number}] where amount is the total INR for that line. If qty is unknown use 1. Translate item names to English where obvious.`;
+  const onFile = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setBusy(true); setErr(null);
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } },
-              { type: "text", text: prompt },
-            ],
-          }],
-        }),
-      });
-      if (!response.ok) {
-        // API/auth/CORS errors funnel here instead of masquerading as a bad photo.
-        let detail = "";
-        try {
-          const errBody = await response.json();
-          detail = errBody?.error?.message || "";
-        } catch { /* response had no JSON body */ }
-        throw new Error(`api ${response.status}${detail ? ": " + detail : ""}`);
-      }
-      const data = await response.json();
-      const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-      const clean = text.replace(/```json|```/g, "").trim();
-      let parsed;
-      try {
-        parsed = JSON.parse(clean);
-      } catch {
-        throw new Error("The AI response was not valid JSON.");
-      }
-      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("nothing found");
-      setRows(parsed.map((r) => ({
-        name: String(r.name || "").trim(),
-        qty: +r.qty || 1,
-        unit: UNITS.includes(r.unit) ? r.unit : "pc",
-        buyPrice: r.buyPrice != null ? +r.buyPrice : "",
-        sellPrice: r.sellPrice != null ? +r.sellPrice : "",
-        amount: r.amount != null ? +r.amount : "",
-      })).filter((r) => r.name));
-    } catch (e) {
-      // Distinguish "couldn't reach/authorize the API" from "photo was unreadable".
-      const isApiError = /^api \d/.test(e?.message || "") || e?.name === "TypeError";
-      setErr(
-        isApiError
-          ? "Couldn't reach the AI service. This feature needs a backend proxy with an API key — it can't call Anthropic directly from the browser. (" + (e?.message || "network error") + ")"
-          : "Could not read items from this photo. Try a clearer, well-lit photo with text facing the camera."
-      );
+      loadRows(await parseFile(f), f.name);
+    } catch (ex) {
+      console.error(ex);
+      setErr("Could not read that file. Supported types: txt, csv, tsv, xls, xlsx, pdf, json.");
     }
     setBusy(false);
   };
 
+  const processPaste = () => {
+    if (!raw.trim()) return setErr("Paste some data into the box first.");
+    try {
+      loadRows(parseRawText(raw), "pasted text");
+    } catch (ex) {
+      console.error(ex);
+      setErr("Could not parse that text.");
+    }
+  };
+
+  const addRow = () => setRows([...(rows || []), { name: "", qty: 1, unit: "pc", buyPrice: "", sellPrice: "", amount: "" }]);
   const edit = (i, k, v) => setRows(rows.map((r, x) => (x === i ? { ...r, [k]: v } : r)));
   const drop = (i) => setRows(rows.filter((_, x) => x !== i));
+  const reset = () => { setRows(null); setRaw(""); setSource(""); setErr(null); };
 
   // Collapse duplicate rows (same name) into one entry so quantities sum instead
   // of one row clobbering another. Returns a Map keyed by lowercased name.
@@ -825,8 +831,8 @@ function ScanTab({ items, setItems, setSales, notify, log }) {
       added++;
     });
     setItems(next);
-    log("scan", `Photo → inventory: ${added} new, ${updated} restocked`);
-    setRows(null); setImg(null);
+    log("import", `Imported to inventory (${source || "manual"}): ${added} new, ${updated} restocked`);
+    reset();
     notify(`Inventory updated — ${added} new, ${updated} restocked`);
   };
 
@@ -842,63 +848,83 @@ function ScanTab({ items, setItems, setSales, notify, log }) {
     total = money(total); profit = money(profit);
     const now = new Date();
     setSales((s) => [...s, {
-      id: uid(), date: todayStr(),
-      time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + " (notebook)",
+      id: uid(), date: saleDate || todayStr(),
+      time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + " (imported)",
       lines, total, profit,
     }]);
     setItems((its) => its.map((i) => {
       const a = agg.get(i.name.toLowerCase());
       return a ? { ...i, stock: Math.max(0, i.stock - a.qty) } : i;
     }));
-    log("scan", `Photo → notebook sale ${INR(total)} · ${lines.length} line(s)`);
-    setRows(null); setImg(null);
-    notify("Notebook sales recorded — " + INR(total));
+    log("import", `Imported sale ${INR(total)} · ${lines.length} line(s) (${source || "manual"})`);
+    reset();
+    notify("Sale recorded — " + INR(total));
   };
 
   return (
     <div>
-      <Header title="Scan Photo" sub="Upload a photo — AI reads the items for you" />
-      <div style={{ background: "#FFF4E0", border: "1px solid #F0D9A8", color: "#7A5A1E", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
-        ⚠ <b>Needs a backend.</b> This reads the photo with the Anthropic API, which cannot be called directly from the browser (no API key, CORS). It will not work until a server proxy is added — see the project README. Everything else in the app works offline.
-      </div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-        <button className={"btn " + (mode === "inventory" ? "primary" : "")} onClick={() => { setMode("inventory"); setRows(null); }}>
-          ➕ Add to inventory (purchase bill / products)
+      <Header title="Data Import" sub="Import a file or paste data — then review, edit, and submit">
+        {rows && <button className="btn ghost small" onClick={reset}>Start over</button>}
+      </Header>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <button className={"btn " + (mode === "inventory" ? "primary" : "")} onClick={() => setMode("inventory")}>
+          ➕ Add to inventory
         </button>
-        <button className={"btn " + (mode === "sales" ? "primary" : "")} onClick={() => { setMode("sales"); setRows(null); }}>
-          📓 Record sold items (notebook page)
+        <button className={"btn " + (mode === "sales" ? "primary" : "")} onClick={() => setMode("sales")}>
+          🧾 Record a sale
         </button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16 }}>
         <section style={S.panel}>
-          <div style={S.panelHead}>1 · Photo</div>
-          <label className="btn" style={{ display: "block", textAlign: "center", padding: "14px", cursor: "pointer" }}>
-            {img ? "Choose a different photo" : "📷 Take / choose photo"}
-            <input type="file" accept="image/*" capture="environment" onChange={onFile} style={{ display: "none" }} />
+          <div style={S.panelHead}>1 · Provide data</div>
+          <label className="btn primary" style={{ display: "block", textAlign: "center", padding: "14px", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Reading file…" : "📂 Choose a file"}
+            <input type="file" accept={RAW_ACCEPT} onChange={onFile} disabled={busy} style={{ display: "none" }} />
           </label>
-          {img && (
-            <>
-              <img src={img.url} alt="uploaded" style={{ width: "100%", borderRadius: 10, marginTop: 12, border: "1px solid #E2EAE3" }} />
-              <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={extract} disabled={busy}>
-                {busy ? "Reading photo…" : mode === "inventory" ? "Extract items for inventory" : "Extract sold items"}
-              </button>
-            </>
-          )}
+          <div style={{ fontSize: 11.5, color: "#8A9C90", margin: "8px 0 14px", textAlign: "center" }}>
+            txt · csv · tsv · xls · xlsx · pdf · json
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#465", marginBottom: 6 }}>…or paste data</div>
+          <textarea
+            className="input"
+            rows={6}
+            placeholder={mode === "inventory"
+              ? "name, qty, buy, sell\nParle-G, 24, 8, 10\nLay's, 40, 16, 20"
+              : "name, qty, amount\nParle-G, 5, 50\nLay's, 3, 60"}
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12.5 }}
+          />
+          <button className="btn" style={{ width: "100%", marginTop: 8 }} onClick={processPaste}>Process pasted data</button>
           {err && <div style={{ color: "#C44536", fontSize: 13, marginTop: 10 }}>{err}</div>}
+          <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 12, lineHeight: 1.5 }}>
+            Columns are auto-detected from headers (name / qty / buy / sell / amount). No headers? Columns are read left-to-right as name, qty, price.
+          </div>
         </section>
 
         <section style={S.panel}>
-          <div style={S.panelHead}>2 · Check &amp; confirm</div>
+          <div style={S.panelHead}>
+            2 · Review &amp; edit{source ? <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0, color: "#8A9C90", marginLeft: 8 }}>from {source}</span> : null}
+            <button className="btn small ghost" style={{ marginLeft: "auto" }} onClick={addRow}>+ Add row</button>
+          </div>
           {!rows ? (
-            <Empty text={busy ? "AI is reading the photo…" : "Extracted items will appear here. You can correct anything before saving."} />
+            <Empty text={busy ? "Reading…" : "Imported rows appear here. You can also build a list by hand with “+ Add row”."} />
           ) : (
             <>
+              {mode === "sales" && (
+                <label style={{ fontSize: 12, color: "#6B7E74", display: "block", marginBottom: 10 }}>
+                  Sale date <input type="date" className="input" style={{ width: "auto", marginLeft: 6 }} value={saleDate} max={todayStr()} onChange={(e) => setSaleDate(e.target.value || todayStr())} />
+                </label>
+              )}
               <table className="tbl">
                 <thead>
                   <tr>
-                    <th>Item</th><th style={{ width: 64 }}>Qty</th>
-                    {mode === "inventory" ? (<><th style={{ width: 80 }}>Buy ₹</th><th style={{ width: 80 }}>Sell ₹</th></>) : (<th style={{ width: 90 }}>Amount ₹</th>)}
+                    <th>Item</th><th style={{ width: 58 }}>Qty</th>
+                    {mode === "inventory"
+                      ? (<><th style={{ width: 72 }}>Unit</th><th style={{ width: 78 }}>Buy ₹</th><th style={{ width: 78 }}>Sell ₹</th></>)
+                      : (<th style={{ width: 96 }}>Amount ₹</th>)}
                     <th style={{ width: 30 }}></th>
                   </tr>
                 </thead>
@@ -909,6 +935,11 @@ function ScanTab({ items, setItems, setSales, notify, log }) {
                       <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" value={r.qty} onChange={(e) => edit(i, "qty", +e.target.value)} /></td>
                       {mode === "inventory" ? (
                         <>
+                          <td>
+                            <select className="input" style={{ padding: "6px 4px" }} value={r.unit} onChange={(e) => edit(i, "unit", e.target.value)}>
+                              {UNITS.map((u) => <option key={u}>{u}</option>)}
+                            </select>
+                          </td>
                           <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.buyPrice} onChange={(e) => edit(i, "buyPrice", e.target.value)} /></td>
                           <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.sellPrice} onChange={(e) => edit(i, "sellPrice", e.target.value)} /></td>
                         </>
@@ -918,15 +949,16 @@ function ScanTab({ items, setItems, setSales, notify, log }) {
                       <td><button className="btn small danger" aria-label="Remove row" onClick={() => drop(i)}>✕</button></td>
                     </tr>
                   ))}
+                  {rows.length === 0 && <tr><td colSpan={mode === "inventory" ? 6 : 4}><Empty text="No rows yet — click “+ Add row”." /></td></tr>}
                 </tbody>
               </table>
               <div style={{ fontSize: 12, color: "#6B7E74", margin: "10px 0" }}>
                 {mode === "inventory"
-                  ? "Items matching existing names will be restocked; new names create new items (blank sell price = buy +15%)."
-                  : "Matched items also reduce stock automatically."}
+                  ? "Existing names get restocked; new names create items (blank sell = buy + 15%)."
+                  : "Matched item names reduce stock automatically; unmatched lines still record as revenue."}
               </div>
-              <button className="btn primary big" style={{ width: "100%" }} onClick={mode === "inventory" ? commitInventory : commitSales}>
-                {mode === "inventory" ? `Add ${rows.length} items to inventory` : `Record ${rows.length} sold items`}
+              <button className="btn primary big" style={{ width: "100%" }} disabled={rows.length === 0} onClick={mode === "inventory" ? commitInventory : commitSales}>
+                {mode === "inventory" ? `Add ${rows.length} item(s) to inventory` : `Record sale · ${rows.length} line(s)`}
               </button>
             </>
           )}
@@ -1027,7 +1059,7 @@ function SalesHistory({ sales, setSales, setItems, notify, log }) {
 }
 
 // ---------- Activity Log ----------
-const LOG_COLORS = { sale: "#1B5E43", inventory: "#2A6FB0", expense: "#C44536", scan: "#7A5AB0", backup: "#7A6A1E" };
+const LOG_COLORS = { sale: "#1B5E43", inventory: "#2A6FB0", expense: "#C44536", import: "#7A5AB0", backup: "#7A6A1E" };
 
 function Logs({ logs, setLogs, notify }) {
   const [date, setDate] = useState(""); // "" = all dates
@@ -1079,26 +1111,172 @@ function Logs({ logs, setLogs, notify }) {
   );
 }
 
-// ---------- Finance ----------
-function Finance({ sales, expenses, setExpenses, notify, log }) {
+// ---------- Finance analytics helpers ----------
+const PIE_COLORS = ["#1B5E43", "#E8A33D", "#2A6FB0", "#C44536", "#7A5AB0", "#3DA17A", "#B0762A", "#8A9C90"];
+const inrTick = (v) => "₹" + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + "k" : v);
+
+// Resolve a period preset (+ optional custom range) to { from, to, label }.
+function periodRange(preset, cfrom, cto) {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const som = (yy, mm) => dateStr(new Date(yy, mm, 1));
+  const eom = (yy, mm) => dateStr(new Date(yy, mm + 1, 0));
+  switch (preset) {
+    case "lastMonth": { const d = new Date(y, m - 1, 1); return { from: som(d.getFullYear(), d.getMonth()), to: eom(d.getFullYear(), d.getMonth()), label: d.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) }; }
+    case "thisYear": return { from: dateStr(new Date(y, 0, 1)), to: dateStr(now), label: "Year " + y };
+    case "last7": { const d = new Date(); d.setDate(d.getDate() - 6); return { from: dateStr(d), to: dateStr(now), label: "Last 7 days" }; }
+    case "last30": { const d = new Date(); d.setDate(d.getDate() - 29); return { from: dateStr(d), to: dateStr(now), label: "Last 30 days" }; }
+    case "custom": return { from: cfrom || dateStr(now), to: cto || dateStr(now), label: `${cfrom || "…"} → ${cto || "…"}` };
+    default: return { from: som(y, m), to: dateStr(now), label: now.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) };
+  }
+}
+
+// Build a daily (or monthly, for long ranges) revenue/profit/expense series.
+function buildSeries(sales, expenses, from, to) {
+  const start = new Date(from + "T00:00"), end = new Date(to + "T00:00");
+  if (isNaN(start) || isNaN(end) || end < start) return [];
+  const monthly = (end - start) / 86400000 > 62;
+  const keyOf = (ds) => (monthly ? ds.slice(0, 7) : ds);
+  const labelOf = (k) => (monthly
+    ? new Date(k + "-01T00:00").toLocaleDateString("en-IN", { month: "short", year: "2-digit" })
+    : new Date(k + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }));
+  const buckets = new Map();
+  if (monthly) { let d = new Date(start.getFullYear(), start.getMonth(), 1); while (d <= end) { const k = dateStr(d).slice(0, 7); buckets.set(k, { key: k, label: labelOf(k), revenue: 0, profit: 0, expenses: 0 }); d = new Date(d.getFullYear(), d.getMonth() + 1, 1); } }
+  else { const d = new Date(start); while (d <= end) { const k = dateStr(d); buckets.set(k, { key: k, label: labelOf(k), revenue: 0, profit: 0, expenses: 0 }); d.setDate(d.getDate() + 1); } }
+  sales.forEach((s) => { const b = buckets.get(keyOf(s.date)); if (b) { b.revenue += s.total; b.profit += s.profit; } });
+  expenses.forEach((e) => { const b = buckets.get(keyOf(e.date)); if (b) b.expenses += e.amount; });
+  return [...buckets.values()].map((b) => ({ ...b, revenue: money(b.revenue), profit: money(b.profit), expenses: money(b.expenses) }));
+}
+
+const ChartCard = ({ title, children, height = 240 }) => (
+  <section style={S.panel}>
+    <div style={S.panelHead}>{title}</div>
+    <div style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">{children}</ResponsiveContainer>
+    </div>
+  </section>
+);
+
+// ---------- Finance (analytics) ----------
+const PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisYear", "This year"], ["custom", "Custom"]];
+
+function Finance({ sales, expenses }) {
+  const [preset, setPreset] = useState("thisMonth");
+  const [cfrom, setCfrom] = useState("");
+  const [cto, setCto] = useState("");
+  const { from, to, label } = periodRange(preset, cfrom, cto);
+
+  const pSales = useMemo(() => sales.filter((s) => s.date >= from && s.date <= to), [sales, from, to]);
+  const pExp = useMemo(() => expenses.filter((e) => e.date >= from && e.date <= to), [expenses, from, to]);
+  const revenue = money(pSales.reduce((a, s) => a + s.total, 0));
+  const grossProfit = money(pSales.reduce((a, s) => a + s.profit, 0));
+  const expTotal = money(pExp.reduce((a, e) => a + e.amount, 0));
+
+  const series = useMemo(() => buildSeries(pSales, pExp, from, to), [pSales, pExp, from, to]);
+  const expBreakdown = useMemo(() => {
+    const m = {};
+    pExp.forEach((e) => { m[e.desc] = (m[e.desc] || 0) + e.amount; });
+    return Object.entries(m).map(([name, value]) => ({ name, value: money(value) })).sort((a, b) => b.value - a.value).slice(0, 8);
+  }, [pExp]);
+  const topItems = useMemo(() => {
+    const m = {};
+    pSales.forEach((s) => (s.lines || []).forEach((l) => { m[l.name] = (m[l.name] || 0) + l.amount; }));
+    return Object.entries(m).map(([name, value]) => ({ name, value: money(value) })).sort((a, b) => b.value - a.value).slice(0, 7);
+  }, [pSales]);
+
+  return (
+    <div>
+      <Header title="Finance" sub={label}>
+        <select className="input" style={{ width: "auto" }} value={preset} onChange={(e) => setPreset(e.target.value)}>
+          {PERIODS.map(([k, lbl]) => <option key={k} value={k}>{lbl}</option>)}
+        </select>
+      </Header>
+
+      {preset === "custom" && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+          <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={cfrom} max={cto || todayStr()} onChange={(e) => setCfrom(e.target.value)} /></label>
+          <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={cto} max={todayStr()} onChange={(e) => setCto(e.target.value)} /></label>
+        </div>
+      )}
+
+      <div style={S.cards}>
+        <Card label="Revenue" value={INR(revenue)} sub={pSales.length + " bills"} />
+        <Card label="Gross profit" value={INR(grossProfit)} sub="sales − item cost" />
+        <Card label="Expenses" value={INR(expTotal)} sub={pExp.length + " entries"} />
+        <Card label="Net profit" value={INR(money(grossProfit - expTotal))} sub="gross − expenses" accent />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16, marginTop: 16 }}>
+        <ChartCard title="Revenue & profit over time">
+          <AreaChart data={series} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+            <defs>
+              <linearGradient id="gRev" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1B5E43" stopOpacity={0.35} /><stop offset="100%" stopColor="#1B5E43" stopOpacity={0.03} /></linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={20} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Area type="monotone" dataKey="revenue" name="Revenue" stroke="#1B5E43" strokeWidth={2} fill="url(#gRev)" />
+            <Area type="monotone" dataKey="profit" name="Profit" stroke="#E8A33D" strokeWidth={2} fill="none" />
+          </AreaChart>
+        </ChartCard>
+
+        <ChartCard title="Expense breakdown">
+          {expBreakdown.length === 0 ? (
+            <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No expenses in this period." /></div>
+          ) : (
+            <PieChart>
+              <Pie data={expBreakdown} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={84} label={(e) => { const n = String(e.name || ""); return n.length > 10 ? n.slice(0, 10) + "…" : n; }} labelLine={false} fontSize={10}>
+                {expBreakdown.map((e, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+              </Pie>
+              <Tooltip formatter={(v) => INR(v)} />
+            </PieChart>
+          )}
+        </ChartCard>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <ChartCard title="Revenue vs expenses">
+          <BarChart data={series} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={20} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="expenses" name="Expenses" fill="#C44536" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ChartCard>
+
+        <ChartCard title="Top items by revenue">
+          {topItems.length === 0 ? (
+            <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No sales in this period." /></div>
+          ) : (
+            <BarChart data={topItems} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} />
+              <YAxis type="category" dataKey="name" tick={{ fontSize: 10.5, fill: "#465" }} width={110} />
+              <Tooltip formatter={(v) => INR(v)} />
+              <Bar dataKey="value" name="Revenue" fill="#2A6FB0" radius={[0, 3, 3, 0]} />
+            </BarChart>
+          )}
+        </ChartCard>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Add Expense (own page) ----------
+function Expenses({ expenses, setExpenses, notify, log }) {
   const [exp, setExp] = useState({ desc: "", amount: "", date: todayStr() });
   const [month, setMonth] = useState(todayStr().slice(0, 7));
-  const mSales = sales.filter((s) => s.date.startsWith(month));
   const mExp = expenses.filter((e) => e.date.startsWith(month));
-  const revenue = money(mSales.reduce((a, s) => a + s.total, 0));
-  const grossProfit = money(mSales.reduce((a, s) => a + s.profit, 0));
-  const expTotal = money(mExp.reduce((a, e) => a + e.amount, 0));
-
-  // last 7 days revenue — use local dateStr to match how sales are stored.
-  const days = [...Array(7)].map((_, k) => {
-    const d = new Date(); d.setDate(d.getDate() - (6 - k));
-    const ds = dateStr(d);
-    return { label: d.toLocaleDateString("en-IN", { weekday: "short" }), rev: sales.filter((s) => s.date === ds).reduce((a, s) => a + s.total, 0) };
-  });
-  const max = Math.max(...days.map((d) => d.rev), 1);
+  const total = money(mExp.reduce((a, e) => a + e.amount, 0));
+  const monthLabel = new Date(month + "-01T00:00").toLocaleDateString("en-IN", { month: "long", year: "numeric" });
 
   const addExp = () => {
-    if (!exp.desc.trim() || !(+exp.amount > 0)) return notify("Enter description and amount");
+    if (!exp.desc.trim() || !(+exp.amount > 0)) return notify("Enter a description and a positive amount");
     const date = exp.date || todayStr();
     setExpenses([...expenses, { id: uid(), date, desc: exp.desc.trim(), amount: +exp.amount }]);
     log("expense", `Expense ${INR(+exp.amount)} — ${exp.desc.trim()}` + (date !== todayStr() ? ` (dated ${date})` : ""));
@@ -1106,51 +1284,54 @@ function Finance({ sales, expenses, setExpenses, notify, log }) {
     notify("Expense recorded");
   };
 
-  const monthLabel = new Date(month + "-01T00:00").toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  const del = (e) => {
+    if (!confirm(`Delete expense “${e.desc}” (${INR(e.amount)})?`)) return;
+    setExpenses(expenses.filter((x) => x.id !== e.id));
+    log("expense", `Deleted expense ${INR(e.amount)} — ${e.desc}`);
+    notify("Expense deleted");
+  };
 
   return (
     <div>
-      <Header title="Finance" sub={"Month of " + monthLabel}>
+      <Header title="Add Expense" sub="Record shop expenses — rent, electricity, supplies, salaries…">
         <label style={{ fontSize: 12, color: "#6B7E74" }}>
-          Month{" "}
-          <input type="month" className="input" style={{ width: "auto", marginLeft: 4 }} value={month} max={todayStr().slice(0, 7)} onChange={(e) => setMonth(e.target.value || todayStr().slice(0, 7))} />
+          Month <input type="month" className="input" style={{ width: "auto", marginLeft: 4 }} value={month} max={todayStr().slice(0, 7)} onChange={(e) => setMonth(e.target.value || todayStr().slice(0, 7))} />
         </label>
       </Header>
-      <div style={S.cards}>
-        <Card label="Revenue (month)" value={INR(revenue)} sub={mSales.length + " bills"} />
-        <Card label="Gross profit" value={INR(grossProfit)} sub="sales − item cost" />
-        <Card label="Expenses" value={INR(expTotal)} sub="rent, electricity, etc." />
-        <Card label="Net profit" value={INR(money(grossProfit - expTotal))} sub="gross − expenses" accent />
-      </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, marginTop: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 16 }}>
         <section style={S.panel}>
-          <div style={S.panelHead}>Last 7 days — revenue</div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, height: 150, padding: "10px 4px 0" }}>
-            {days.map((d, i) => (
-              <div key={i} style={{ flex: 1, textAlign: "center" }}>
-                <div style={{ fontSize: 10.5, color: "#567", marginBottom: 3 }}>{d.rev ? INR(d.rev) : ""}</div>
-                <div style={{ height: Math.max(4, (d.rev / max) * 100), background: i === 6 ? "#1B5E43" : "#BBD4C6", borderRadius: "4px 4px 0 0" }} />
-                <div style={{ fontSize: 11, color: "#678", marginTop: 4 }}>{d.label}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section style={S.panel}>
-          <div style={S.panelHead}>Add expense</div>
-          <Field label="Description"><input className="input" value={exp.desc} onChange={(e) => setExp({ ...exp, desc: e.target.value })} placeholder="e.g. Electricity bill" /></Field>
+          <div style={S.panelHead}>New expense</div>
+          <Field label="Description"><input className="input" autoFocus value={exp.desc} onChange={(e) => setExp({ ...exp, desc: e.target.value })} placeholder="e.g. Electricity bill" /></Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Field label="Amount (₹)"><input className="input" type="number" min="0" step="0.01" value={exp.amount} onChange={(e) => setExp({ ...exp, amount: e.target.value })} /></Field>
             <Field label="Date"><input className="input" type="date" max={todayStr()} value={exp.date} onChange={(e) => setExp({ ...exp, date: e.target.value })} /></Field>
           </div>
-          <button className="btn primary" style={{ width: "100%", marginTop: 8 }} onClick={addExp}>Record expense</button>
-          <div style={{ marginTop: 14 }}>
-            {mExp.length === 0 && <Empty text={"No expenses in " + monthLabel + "."} />}
-            {[...mExp].reverse().slice(0, 8).map((e) => (
-              <div key={e.id} style={S.row}><span>{e.desc} <span style={{ color: "#9AA", fontSize: 11.5 }}>· {e.date}</span></span><b>{INR(e.amount)}</b></div>
-            ))}
+          <button className="btn primary big" style={{ width: "100%", marginTop: 8 }} onClick={addExp}>Record expense</button>
+        </section>
+
+        <section style={S.panel}>
+          <div style={S.panelHead}>
+            {monthLabel}
+            <span style={{ marginLeft: "auto", fontWeight: 800 }}>{INR(total)}</span>
           </div>
+          {mExp.length === 0 ? (
+            <Empty text={"No expenses recorded in " + monthLabel + "."} />
+          ) : (
+            <table className="tbl">
+              <thead><tr><th style={{ width: 110 }}>Date</th><th>Description</th><th style={{ textAlign: "right" }}>Amount</th><th style={{ width: 30 }}></th></tr></thead>
+              <tbody>
+                {[...mExp].sort((a, b) => (a.date < b.date ? 1 : -1)).map((e) => (
+                  <tr key={e.id}>
+                    <td style={{ color: "#677", whiteSpace: "nowrap" }}>{e.date}</td>
+                    <td>{e.desc}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(e.amount)}</td>
+                    <td><button className="btn small danger" aria-label={"Delete " + e.desc} onClick={() => del(e)}>✕</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </section>
       </div>
     </div>
