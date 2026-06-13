@@ -175,10 +175,12 @@ const SEED_ITEMS = [
   ["Good Knight Refill", "Household & Cleaning", "pc", 65, 75, 12, 4],
   ["Aluminium Foil 9m", "Household & Cleaning", "pc", 50, 65, 8, 3],
 ].map(([name, category, unit, buyPrice, sellPrice, stock, lowAt]) => ({
-  id: uid(), name, category, unit, buyPrice, sellPrice, stock, lowAt,
+  id: uid(), name, category, unit, buyPrice, sellPrice, stock, lowAt, createdAt: todayStr(),
 }));
 
 const STORAGE_KEY = "kirana-data-v2";
+// Categories of activity recorded in the global Activity Log.
+const LOG_TYPES = ["sale", "inventory", "expense", "scan", "backup"];
 
 // ---------- main app ----------
 export default function GroceryStoreManager() {
@@ -186,6 +188,7 @@ export default function GroceryStoreManager() {
   const [items, setItems] = useState([]);
   const [sales, setSales] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [logs, setLogs] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -199,6 +202,7 @@ export default function GroceryStoreManager() {
           setItems(d.items || []);
           setSales(d.sales || []);
           setExpenses(d.expenses || []);
+          setLogs(d.logs || []);
         } else {
           setItems(SEED_ITEMS);
         }
@@ -216,23 +220,41 @@ export default function GroceryStoreManager() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await window.storage.set(STORAGE_KEY, JSON.stringify({ items, sales, expenses }));
+        await window.storage.set(STORAGE_KEY, JSON.stringify({ items, sales, expenses, logs }));
       } catch (e) {
         console.error("save failed", e);
         notify("⚠ Could not save — device storage may be full. Download a backup now.");
       }
     }, 400);
     return () => clearTimeout(saveTimer.current);
-  }, [items, sales, expenses, loaded]);
+  }, [items, sales, expenses, logs, loaded]);
 
   const notify = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   };
 
+  // Append an entry to the global activity log (newest first; capped to protect storage).
+  const addLog = (type, message) => {
+    const now = new Date();
+    setLogs((l) =>
+      [
+        {
+          id: uid(),
+          at: now.getTime(),
+          date: todayStr(),
+          time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          type,
+          message,
+        },
+        ...l,
+      ].slice(0, 2000)
+    );
+  };
+
   const exportData = () => {
     const blob = new Blob(
-      [JSON.stringify({ items, sales, expenses, exportedAt: new Date().toISOString() }, null, 2)],
+      [JSON.stringify({ items, sales, expenses, logs, exportedAt: new Date().toISOString() }, null, 2)],
       { type: "application/json" }
     );
     const url = URL.createObjectURL(blob);
@@ -241,6 +263,7 @@ export default function GroceryStoreManager() {
     a.download = `dukaan-backup-${todayStr()}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    addLog("backup", "Backup downloaded");
     notify("Backup downloaded");
   };
 
@@ -257,6 +280,8 @@ export default function GroceryStoreManager() {
         setItems(d.items);
         setSales(Array.isArray(d.sales) ? d.sales : []);
         setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
+        setLogs(Array.isArray(d.logs) ? d.logs : []);
+        addLog("backup", "Backup restored from file");
         notify("Backup restored");
       } catch {
         notify("⚠ That file is not a valid backup.");
@@ -287,6 +312,7 @@ export default function GroceryStoreManager() {
           ["scan", "✦", "Scan Photo"],
           ["sales", "⊟", "Sales History"],
           ["finance", "∑", "Finance"],
+          ["logs", "❑", "Activity Log"],
         ].map(([k, ic, label]) => (
           <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
             <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
@@ -312,17 +338,19 @@ export default function GroceryStoreManager() {
         {!loaded ? (
           <div style={{ padding: 40, color: "#667" }}>Loading store data…</div>
         ) : tab === "dashboard" ? (
-          <Dashboard items={items} sales={sales} expenses={expenses} lowStock={lowStock} goBilling={() => setTab("billing")} />
+          <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         ) : tab === "billing" ? (
-          <Billing items={items} setItems={setItems} setSales={setSales} notify={notify} />
+          <Billing items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
-          <Inventory items={items} setItems={setItems} notify={notify} />
+          <Inventory items={items} setItems={setItems} notify={notify} log={addLog} />
         ) : tab === "scan" ? (
-          <ScanTab items={items} setItems={setItems} setSales={setSales} notify={notify} />
+          <ScanTab items={items} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
-          <SalesHistory sales={sales} />
+          <SalesHistory sales={sales} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
+        ) : tab === "logs" ? (
+          <Logs logs={logs} setLogs={setLogs} notify={notify} />
         ) : (
-          <Finance sales={sales} expenses={expenses} setExpenses={setExpenses} notify={notify} />
+          <Finance sales={sales} expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         )}
       </main>
 
@@ -333,21 +361,29 @@ export default function GroceryStoreManager() {
 
 // ---------- Dashboard ----------
 function Dashboard({ items, sales, lowStock, goBilling }) {
-  const t = todayStr();
-  const todaySales = sales.filter((s) => s.date === t);
-  const rev = todaySales.reduce((a, s) => a + s.total, 0);
-  const profit = todaySales.reduce((a, s) => a + s.profit, 0);
-  const stockValue = items.reduce((a, i) => a + i.buyPrice * i.stock, 0);
-  const month = t.slice(0, 7);
-  const monthRev = sales.filter((s) => s.date.startsWith(month)).reduce((a, s) => a + s.total, 0);
+  const [date, setDate] = useState(todayStr());
+  const isToday = date === todayStr();
+  const daySales = sales.filter((s) => s.date === date);
+  const rev = money(daySales.reduce((a, s) => a + s.total, 0));
+  const profit = money(daySales.reduce((a, s) => a + s.profit, 0));
+  const stockValue = money(items.reduce((a, i) => a + i.buyPrice * i.stock, 0));
+  const month = date.slice(0, 7);
+  const monthRev = money(sales.filter((s) => s.date.startsWith(month)).reduce((a, s) => a + s.total, 0));
+  const monthName = new Date(date + "T00:00").toLocaleDateString("en-IN", { month: "long" });
+  const niceDate = new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 
   return (
     <div>
-      <Header title="Dashboard" sub={new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })} />
+      <Header title="Dashboard" sub={niceDate}>
+        <label style={{ fontSize: 12, color: "#6B7E74" }}>
+          View day{" "}
+          <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={date} max={todayStr()} onChange={(e) => setDate(e.target.value)} />
+        </label>
+      </Header>
       <div style={S.cards}>
-        <Card label="Today's sales" value={INR(rev)} sub={todaySales.length + " bills"} />
-        <Card label="Today's profit" value={INR(profit)} sub="after item cost" accent />
-        <Card label="This month" value={INR(monthRev)} sub="total revenue" />
+        <Card label={isToday ? "Today's sales" : "Sales (this day)"} value={INR(rev)} sub={daySales.length + " bills"} />
+        <Card label={isToday ? "Today's profit" : "Profit (this day)"} value={INR(profit)} sub="after item cost" accent />
+        <Card label={monthName + " revenue"} value={INR(monthRev)} sub="month to date" />
         <Card label="Stock value" value={INR(stockValue)} sub={items.length + " items (at cost)"} />
       </div>
 
@@ -369,13 +405,13 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
           )}
         </section>
         <section style={S.panel}>
-          <div style={S.panelHead}>Recent bills</div>
-          {todaySales.length === 0 ? (
-            <Empty text="No bills yet today.">
-              <button className="btn primary" onClick={goBilling}>Start billing</button>
+          <div style={S.panelHead}>{isToday ? "Recent bills" : "Bills on this day"}</div>
+          {daySales.length === 0 ? (
+            <Empty text={isToday ? "No bills yet today." : "No bills on this day."}>
+              {isToday && <button className="btn primary" onClick={goBilling}>Start billing</button>}
             </Empty>
           ) : (
-            [...todaySales].reverse().slice(0, 8).map((s) => (
+            [...daySales].reverse().slice(0, 8).map((s) => (
               <div key={s.id} style={S.row}>
                 <span>{s.time} · {s.lines.length} items</span>
                 <b>{INR(s.total)}</b>
@@ -389,10 +425,11 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
 }
 
 // ---------- Billing / POS ----------
-function Billing({ items, setItems, setSales, notify }) {
+function Billing({ items, setItems, setSales, notify, log }) {
   const [q, setQ] = useState("");
   const [cart, setCart] = useState([]); // {id, name, unit, sellPrice, buyPrice, qty}
   const [lastSale, setLastSale] = useState(null);
+  const [saleDate, setSaleDate] = useState(todayStr()); // back-date a bill if needed
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
 
@@ -438,10 +475,11 @@ function Billing({ items, setItems, setSales, notify }) {
   const completeSale = () => {
     if (cart.length === 0) return;
     const now = new Date();
+    const backDated = saleDate !== todayStr();
     const sale = {
       id: uid(),
-      date: todayStr(),
-      time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+      date: saleDate,
+      time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + (backDated ? " (back-dated)" : ""),
       lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, amount: money(c.sellPrice * c.qty) })),
       total, profit,
     };
@@ -451,6 +489,7 @@ function Billing({ items, setItems, setSales, notify }) {
       return c ? { ...i, stock: Math.max(0, i.stock - c.qty) } : i;
     }));
     setLastSale(sale);
+    log("sale", `Bill ${INR(total)} · ${cart.length} item(s)` + (backDated ? ` · back-dated to ${saleDate}` : ""));
     setCart([]);
     setQ("");
     searchRef.current?.focus();
@@ -459,7 +498,12 @@ function Billing({ items, setItems, setSales, notify }) {
 
   return (
     <div>
-      <Header title="Billing" sub="Tap an item to add it to the bill" />
+      <Header title="Billing" sub="Tap an item to add it to the bill">
+        <label style={{ fontSize: 12, color: saleDate === todayStr() ? "#6B7E74" : "#C44536", fontWeight: 600 }}>
+          Bill date{" "}
+          <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={saleDate} max={todayStr()} onChange={(e) => setSaleDate(e.target.value || todayStr())} />
+        </label>
+      </Header>
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
         {/* item picker */}
         <section style={S.panel}>
@@ -536,7 +580,7 @@ function Billing({ items, setItems, setSales, notify }) {
 // ---------- Inventory ----------
 const blankItem = { name: "", code: "", category: CATEGORIES[0], unit: "pc", buyPrice: "", sellPrice: "", stock: "", lowAt: 5 };
 
-function Inventory({ items, setItems, notify }) {
+function Inventory({ items, setItems, notify, log }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("All");
   const [form, setForm] = useState(null); // null | {…item, id?}
@@ -558,10 +602,12 @@ function Inventory({ items, setItems, notify }) {
     if (buy < 0 || sell < 0 || stock < 0) return notify("Prices and stock cannot be negative");
     const rec = { ...f, name: f.name.trim(), code: (f.code || "").trim(), buyPrice: buy || 0, sellPrice: sell, stock, lowAt };
     if (f.id) {
-      setItems(items.map((i) => (i.id === f.id ? rec : i)));
+      setItems(items.map((i) => (i.id === f.id ? { ...rec, updatedAt: todayStr() } : i)));
+      log("inventory", `Edited item “${rec.name}” (buy ${INR(rec.buyPrice)}, sell ${INR(rec.sellPrice)}, stock ${rec.stock})`);
       notify("Item updated");
     } else {
-      setItems([...items, { ...rec, id: uid() }]);
+      setItems([...items, { ...rec, id: uid(), createdAt: todayStr() }]);
+      log("inventory", `Added item “${rec.name}” · ${rec.stock} ${rec.unit} @ ${INR(rec.sellPrice)}`);
       notify("Item added to inventory");
     }
     setForm(null);
@@ -570,7 +616,8 @@ function Inventory({ items, setItems, notify }) {
   const doRestock = () => {
     const qty = +restock.qty;
     if (!(qty > 0)) return notify("Enter quantity to add");
-    setItems(items.map((i) => (i.id === restock.id ? { ...i, stock: i.stock + qty } : i)));
+    setItems(items.map((i) => (i.id === restock.id ? { ...i, stock: i.stock + qty, updatedAt: todayStr() } : i)));
+    log("inventory", `Restocked “${restock.name}” +${qty}`);
     setRestock(null);
     notify("Stock added");
   };
@@ -592,13 +639,14 @@ function Inventory({ items, setItems, notify }) {
       <section style={S.panel}>
         <table className="tbl">
           <thead>
-            <tr><th>Item</th><th>Category</th><th style={{ textAlign: "right" }}>Buy</th><th style={{ textAlign: "right" }}>Sell</th><th style={{ textAlign: "right" }}>Margin</th><th style={{ textAlign: "right" }}>Stock</th><th></th></tr>
+            <tr><th>Item</th><th>Category</th><th>Added</th><th style={{ textAlign: "right" }}>Buy</th><th style={{ textAlign: "right" }}>Sell</th><th style={{ textAlign: "right" }}>Margin</th><th style={{ textAlign: "right" }}>Stock</th><th></th></tr>
           </thead>
           <tbody>
             {filtered.map((i) => (
               <tr key={i.id}>
-                <td style={{ fontWeight: 600 }}>{i.name}</td>
+                <td style={{ fontWeight: 600 }}>{i.name}{i.code ? <span style={{ color: "#9AA", fontWeight: 400, fontSize: 11 }}> · {i.code}</span> : null}</td>
                 <td style={{ color: "#677" }}>{i.category}</td>
+                <td style={{ color: "#789", whiteSpace: "nowrap", fontSize: 12.5 }}>{i.createdAt || "—"}{i.updatedAt && i.updatedAt !== i.createdAt ? <span title={"edited " + i.updatedAt}> ✎</span> : null}</td>
                 <td style={{ textAlign: "right" }}>{INR(i.buyPrice)}</td>
                 <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(i.sellPrice)}</td>
                 <td style={{ textAlign: "right", color: "#1B5E43" }}>{i.buyPrice ? Math.round(((i.sellPrice - i.buyPrice) / i.buyPrice) * 100) + "%" : "—"}</td>
@@ -608,11 +656,11 @@ function Inventory({ items, setItems, notify }) {
                 <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                   <button className="btn small" onClick={() => setRestock({ id: i.id, name: i.name, qty: "" })}>Restock</button>{" "}
                   <button className="btn small ghost" onClick={() => setForm({ ...i })}>Edit</button>{" "}
-                  <button className="btn small danger" aria-label={"Delete " + i.name} onClick={() => { if (confirm("Delete " + i.name + "?")) setItems(items.filter((x) => x.id !== i.id)); }}>✕</button>
+                  <button className="btn small danger" aria-label={"Delete " + i.name} onClick={() => { if (confirm("Delete " + i.name + "?")) { setItems(items.filter((x) => x.id !== i.id)); log("inventory", `Deleted item “${i.name}”`); } }}>✕</button>
                 </td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={7}><Empty text="No items found." /></td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={8}><Empty text="No items found." /></td></tr>}
           </tbody>
         </table>
       </section>
@@ -656,7 +704,7 @@ function Inventory({ items, setItems, notify }) {
 }
 
 // ---------- Scan Photo (AI extraction) ----------
-function ScanTab({ items, setItems, setSales, notify }) {
+function ScanTab({ items, setItems, setSales, notify, log }) {
   const [mode, setMode] = useState("inventory"); // "inventory" | "sales"
   const [img, setImg] = useState(null); // { data, mediaType, url }
   const [busy, setBusy] = useState(false);
@@ -777,6 +825,7 @@ function ScanTab({ items, setItems, setSales, notify }) {
       added++;
     });
     setItems(next);
+    log("scan", `Photo → inventory: ${added} new, ${updated} restocked`);
     setRows(null); setImg(null);
     notify(`Inventory updated — ${added} new, ${updated} restocked`);
   };
@@ -801,6 +850,7 @@ function ScanTab({ items, setItems, setSales, notify }) {
       const a = agg.get(i.name.toLowerCase());
       return a ? { ...i, stock: Math.max(0, i.stock - a.qty) } : i;
     }));
+    log("scan", `Photo → notebook sale ${INR(total)} · ${lines.length} line(s)`);
     setRows(null); setImg(null);
     notify("Notebook sales recorded — " + INR(total));
   };
@@ -887,22 +937,56 @@ function ScanTab({ items, setItems, setSales, notify }) {
 }
 
 // ---------- Sales history ----------
-function SalesHistory({ sales }) {
+function SalesHistory({ sales, setSales, setItems, notify, log }) {
   const [open, setOpen] = useState(null);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [editing, setEditing] = useState(null); // {id, date, total}
+
+  const visible = sales.filter((s) => (!from || s.date >= from) && (!to || s.date <= to));
   const byDate = useMemo(() => {
     const m = {};
-    [...sales].reverse().forEach((s) => { (m[s.date] = m[s.date] || []).push(s); });
-    return Object.entries(m);
-  }, [sales]);
+    [...visible].reverse().forEach((s) => { (m[s.date] = m[s.date] || []).push(s); });
+    return Object.entries(m).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }, [visible]);
+  const rangeTotal = money(visible.reduce((a, s) => a + s.total, 0));
+
+  // Deleting a bill returns its quantities to stock (matched by item name).
+  const deleteSale = (s) => {
+    if (!confirm(`Delete this ${INR(s.total)} bill from ${s.date}? Stock will be added back.`)) return;
+    setItems((its) => its.map((i) => {
+      const ln = s.lines.find((l) => l.name.toLowerCase() === i.name.toLowerCase());
+      return ln ? { ...i, stock: i.stock + ln.qty } : i;
+    }));
+    setSales((all) => all.filter((x) => x.id !== s.id));
+    log("sale", `Deleted bill ${INR(s.total)} (${s.date}) — stock restored`);
+    notify("Bill deleted, stock restored");
+  };
+
+  const saveDate = () => {
+    const nd = editing.date || todayStr();
+    setSales((all) => all.map((x) => (x.id === editing.id ? { ...x, date: nd } : x)));
+    log("sale", `Re-dated bill ${INR(editing.total)} → ${nd}`);
+    setEditing(null);
+    notify("Bill date updated");
+  };
 
   return (
     <div>
-      <Header title="Sales History" sub={sales.length + " bills recorded"} />
+      <Header title="Sales History" sub={`${visible.length} of ${sales.length} bills · ${INR(rangeTotal)}`} />
+
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={from} max={to || todayStr()} onChange={(e) => setFrom(e.target.value)} /></label>
+        <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={to} max={todayStr()} onChange={(e) => setTo(e.target.value)} /></label>
+        {(from || to) && <button className="btn ghost small" onClick={() => { setFrom(""); setTo(""); }}>Clear range</button>}
+      </div>
+
       {sales.length === 0 && <section style={S.panel}><Empty text="No sales yet. Bills will appear here after you complete a sale." /></section>}
+      {sales.length > 0 && visible.length === 0 && <section style={S.panel}><Empty text="No bills in this date range." /></section>}
       {byDate.map(([date, list]) => (
         <section key={date} style={{ ...S.panel, marginBottom: 14 }}>
           <div style={S.panelHead}>
-            {new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" })}
+            {new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
             <span style={{ marginLeft: "auto", fontWeight: 800 }}>{INR(list.reduce((a, s) => a + s.total, 0))}</span>
           </div>
           {list.map((s) => (
@@ -918,21 +1002,87 @@ function SalesHistory({ sales }) {
                       <span>{l.name} × {l.qty}</span><span>{INR(l.amount)}</span>
                     </div>
                   ))}
-                  <button className="btn small" style={{ marginTop: 8 }} onClick={() => printReceipt(s)}>🖨 Print receipt</button>
+                  <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                    <button className="btn small" onClick={() => printReceipt(s)}>🖨 Print</button>
+                    <button className="btn small ghost" onClick={() => setEditing({ id: s.id, date: s.date, total: s.total })}>✎ Change date</button>
+                    <button className="btn small danger" onClick={() => deleteSale(s)}>🗑 Delete</button>
+                  </div>
                 </div>
               )}
             </div>
           ))}
         </section>
       ))}
+
+      {editing && (
+        <Modal title={"Change bill date — " + INR(editing.total)} onClose={() => setEditing(null)}>
+          <Field label="New date">
+            <input type="date" className="input" autoFocus max={todayStr()} value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} />
+          </Field>
+          <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={saveDate}>Save date</button>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---------- Activity Log ----------
+const LOG_COLORS = { sale: "#1B5E43", inventory: "#2A6FB0", expense: "#C44536", scan: "#7A5AB0", backup: "#7A6A1E" };
+
+function Logs({ logs, setLogs, notify }) {
+  const [date, setDate] = useState(""); // "" = all dates
+  const [type, setType] = useState("all");
+
+  const filtered = logs.filter((l) => (!date || l.date === date) && (type === "all" || l.type === type));
+
+  const clear = () => {
+    if (confirm("Clear the entire activity log? This cannot be undone (it does not affect sales or stock).")) {
+      setLogs([]);
+      notify("Activity log cleared");
+    }
+  };
+
+  return (
+    <div>
+      <Header title="Activity Log" sub={logs.length + " events recorded — every change is logged here"}>
+        {logs.length > 0 && <button className="btn ghost small" onClick={clear}>Clear log</button>}
+      </Header>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12, color: "#6B7E74" }}>Day <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={date} max={todayStr()} onChange={(e) => setDate(e.target.value)} /></label>
+        <select className="input" style={{ width: 180 }} value={type} onChange={(e) => setType(e.target.value)}>
+          <option value="all">All activity</option>
+          {LOG_TYPES.map((t) => <option key={t} value={t}>{t[0].toUpperCase() + t.slice(1)}</option>)}
+        </select>
+        {(date || type !== "all") && <button className="btn ghost small" onClick={() => { setDate(""); setType("all"); }}>Show all</button>}
+      </div>
+
+      <section style={S.panel}>
+        {filtered.length === 0 ? (
+          <Empty text={logs.length === 0 ? "No activity yet. Actions you take in the app will appear here." : "No activity matches this filter."} />
+        ) : (
+          <table className="tbl">
+            <thead><tr><th style={{ width: 168 }}>When</th><th style={{ width: 96 }}>Type</th><th>Activity</th></tr></thead>
+            <tbody>
+              {filtered.map((l) => (
+                <tr key={l.id}>
+                  <td style={{ whiteSpace: "nowrap", color: "#677" }}>{l.date} <span style={{ color: "#9AA" }}>{l.time}</span></td>
+                  <td><span style={{ fontSize: 11, fontWeight: 800, textTransform: "uppercase", color: LOG_COLORS[l.type] || "#555" }}>{l.type}</span></td>
+                  <td>{l.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
     </div>
   );
 }
 
 // ---------- Finance ----------
-function Finance({ sales, expenses, setExpenses, notify }) {
-  const [exp, setExp] = useState({ desc: "", amount: "" });
-  const month = todayStr().slice(0, 7);
+function Finance({ sales, expenses, setExpenses, notify, log }) {
+  const [exp, setExp] = useState({ desc: "", amount: "", date: todayStr() });
+  const [month, setMonth] = useState(todayStr().slice(0, 7));
   const mSales = sales.filter((s) => s.date.startsWith(month));
   const mExp = expenses.filter((e) => e.date.startsWith(month));
   const revenue = money(mSales.reduce((a, s) => a + s.total, 0));
@@ -949,14 +1099,23 @@ function Finance({ sales, expenses, setExpenses, notify }) {
 
   const addExp = () => {
     if (!exp.desc.trim() || !(+exp.amount > 0)) return notify("Enter description and amount");
-    setExpenses([...expenses, { id: uid(), date: todayStr(), desc: exp.desc.trim(), amount: +exp.amount }]);
-    setExp({ desc: "", amount: "" });
+    const date = exp.date || todayStr();
+    setExpenses([...expenses, { id: uid(), date, desc: exp.desc.trim(), amount: +exp.amount }]);
+    log("expense", `Expense ${INR(+exp.amount)} — ${exp.desc.trim()}` + (date !== todayStr() ? ` (dated ${date})` : ""));
+    setExp({ desc: "", amount: "", date: todayStr() });
     notify("Expense recorded");
   };
 
+  const monthLabel = new Date(month + "-01T00:00").toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+
   return (
     <div>
-      <Header title="Finance" sub={"Month of " + new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" })} />
+      <Header title="Finance" sub={"Month of " + monthLabel}>
+        <label style={{ fontSize: 12, color: "#6B7E74" }}>
+          Month{" "}
+          <input type="month" className="input" style={{ width: "auto", marginLeft: 4 }} value={month} max={todayStr().slice(0, 7)} onChange={(e) => setMonth(e.target.value || todayStr().slice(0, 7))} />
+        </label>
+      </Header>
       <div style={S.cards}>
         <Card label="Revenue (month)" value={INR(revenue)} sub={mSales.length + " bills"} />
         <Card label="Gross profit" value={INR(grossProfit)} sub="sales − item cost" />
@@ -981,11 +1140,15 @@ function Finance({ sales, expenses, setExpenses, notify }) {
         <section style={S.panel}>
           <div style={S.panelHead}>Add expense</div>
           <Field label="Description"><input className="input" value={exp.desc} onChange={(e) => setExp({ ...exp, desc: e.target.value })} placeholder="e.g. Electricity bill" /></Field>
-          <Field label="Amount (₹)"><input className="input" type="number" min="0" step="0.01" value={exp.amount} onChange={(e) => setExp({ ...exp, amount: e.target.value })} /></Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Amount (₹)"><input className="input" type="number" min="0" step="0.01" value={exp.amount} onChange={(e) => setExp({ ...exp, amount: e.target.value })} /></Field>
+            <Field label="Date"><input className="input" type="date" max={todayStr()} value={exp.date} onChange={(e) => setExp({ ...exp, date: e.target.value })} /></Field>
+          </div>
           <button className="btn primary" style={{ width: "100%", marginTop: 8 }} onClick={addExp}>Record expense</button>
           <div style={{ marginTop: 14 }}>
-            {[...mExp].reverse().slice(0, 6).map((e) => (
-              <div key={e.id} style={S.row}><span>{e.desc}</span><b>{INR(e.amount)}</b></div>
+            {mExp.length === 0 && <Empty text={"No expenses in " + monthLabel + "."} />}
+            {[...mExp].reverse().slice(0, 8).map((e) => (
+              <div key={e.id} style={S.row}><span>{e.desc} <span style={{ color: "#9AA", fontSize: 11.5 }}>· {e.date}</span></span><b>{INR(e.amount)}</b></div>
             ))}
           </div>
         </section>
