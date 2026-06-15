@@ -5,8 +5,11 @@ import {
 } from "recharts";
 import JsBarcode from "jsbarcode";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "firebase/auth";
-import { ref as dbRef, onValue, set as dbSet } from "firebase/database";
-import { auth, db } from "./lib/firebase.js";
+import { auth } from "./lib/firebase.js";
+import {
+  toMap, mapToArray, isLegacyShape, buildSliceUpdate, mergeRemote,
+  writeSlice, overwriteSlice, subscribeSlice, subscribeConnection,
+} from "./lib/sync.js";
 import { parseFile, parseRawText } from "./lib/parse.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 
@@ -479,13 +482,22 @@ function StoreManager({ user, onLogout }) {
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
 
-  // load
   // ---- Realtime Database sync (live across every signed-in device) ----
-  // Each slice is its own DB node so concurrent edits to different slices never clobber.
-  // A localStorage cache gives instant first paint and offline reads.
+  // Every record (item/sale/expense/log) lives at its own keyed node — shop/<slice>/<id> —
+  // so concurrent edits from different devices to different records merge instead of
+  // clobbering. Writes are field-level deltas; incoming snapshots are 3-way merged with any
+  // un-pushed local edits. A localStorage cache gives instant first paint and offline reads.
+  // See src/lib/sync.js for the array↔map bridge.
   const CACHE_KEY = "psm-cache-v1";
-  const lastRemote = useRef({ items: null, sales: null, expenses: null, logs: null });
+  const lastRemote = useRef({ items: {}, sales: {}, expenses: {}, logs: {} }); // last cloud map per slice
   const synced = useRef({ items: false, sales: false, expenses: false, logs: false });
+  const seeded = useRef(false);
+  const [online, setOnline] = useState(true);
+
+  // Always-current local state, readable from inside async listeners (for the merge).
+  const dataRef = useRef({ items, sales, expenses, logs });
+  dataRef.current = { items, sales, expenses, logs };
+  const notifyRef = useRef(null);
 
   // 1) Instant paint from the local cache.
   useEffect(() => {
@@ -498,54 +510,64 @@ function StoreManager({ user, onLogout }) {
 
   // 2) Subscribe to the cloud; changes from any device flow in live.
   useEffect(() => {
-    const norm = (v) => (Array.isArray(v) ? v : v ? Object.values(v) : []);
     const slices = [["items", setItems], ["sales", setSales], ["expenses", setExpenses], ["logs", setLogs]];
-    const unsubs = slices.map(([key, setter]) =>
-      onValue(
-        dbRef(db, "shop/" + key),
-        (snap) => {
-          const val = snap.val();
-          if (key === "items") {
-            if (val === null) { synced.current.items = true; setItems(SEED_ITEMS); return; } // first run anywhere → seed
-            const cloud = norm(val);
-            const have = new Set(cloud.map((i) => (i.name || "").toLowerCase()));
-            const missing = SEED_ITEMS.filter((s) => !have.has(s.name.toLowerCase()));
-            lastRemote.current.items = JSON.stringify(cloud);
+    const unsubs = slices.map(([slice, setter]) =>
+      subscribeSlice(
+        slice,
+        (val) => {
+          // First run anywhere: seed the catalogue once, then write it to the cloud.
+          if (slice === "items" && val === null) {
+            if (seeded.current) { synced.current.items = true; return; }
+            seeded.current = true;
+            const map = toMap(SEED_ITEMS);
+            lastRemote.current.items = map;
             synced.current.items = true;
-            setItems(missing.length ? [...cloud, ...missing] : cloud);
+            setItems(mapToArray("items", map));
+            overwriteSlice("items", map).catch((e) => console.error("seed write failed", e));
             return;
           }
-          const arr = norm(val);
-          lastRemote.current[key] = JSON.stringify(arr);
-          synced.current[key] = true;
-          setter(arr);
+          const theirs = toMap(val);
+          // One-time migration of legacy array / numeric-keyed data → keyed-by-id map.
+          if (isLegacyShape(val, theirs)) {
+            overwriteSlice(slice, theirs).catch((e) => console.error("migrate failed", slice, e));
+          }
+          // Reconcile the cloud snapshot with any local edits not yet pushed.
+          const ours = toMap(dataRef.current[slice]);
+          const merged = synced.current[slice]
+            ? mergeRemote(lastRemote.current[slice], theirs, ours)
+            : theirs;
+          lastRemote.current[slice] = theirs;
+          synced.current[slice] = true;
+          setter(mapToArray(slice, merged));
         },
-        (err) => console.error("sync read failed", err)
+        (err) => {
+          console.error("sync read failed", slice, err);
+          notifyRef.current?.("⚠ Cloud sync error — check your connection or account access.");
+        }
       )
     );
-    return () => unsubs.forEach((u) => u());
+    const unsubConn = subscribeConnection(setOnline);
+    return () => { unsubs.forEach((u) => u()); unsubConn(); };
   }, []);
 
-  // 3) Push a slice to the cloud when it changes locally (after the first cloud snapshot,
-  //    and skipping values that just arrived from the cloud).
-  const pushSlice = useCallback((key, value) => {
-    if (!synced.current[key]) return; // don't overwrite the cloud before we've read it
-    const json = JSON.stringify(value);
-    if (json === lastRemote.current[key]) return; // echo of a cloud update
-    lastRemote.current[key] = json;
-    dbSet(dbRef(db, "shop/" + key), value).catch((e) => {
-      console.error("sync write failed", e);
-      notify("⚠ Couldn't sync to cloud (offline?). Saved on this device.");
+  // 3) Push field-level deltas to the cloud when a slice changes locally (after the first
+  //    cloud snapshot). buildSliceUpdate skips no-op echoes, so this is loop-safe.
+  const pushSlice = useCallback((slice, value) => {
+    if (!synced.current[slice]) return; // don't write before we've read the cloud once
+    const { updates, nextMap, changed } = buildSliceUpdate(lastRemote.current[slice], value);
+    if (!changed) return;
+    lastRemote.current[slice] = nextMap; // optimistic; the echo snapshot confirms it
+    writeSlice(slice, updates).catch((e) => {
+      console.error("sync write failed", slice, e);
+      notify("⚠ Couldn't sync to cloud — saved on this device, will retry when back online.");
     });
   }, []);
-  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("items", items), 500); return () => clearTimeout(t); }, [items, loaded, pushSlice]);
-  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("sales", sales), 500); return () => clearTimeout(t); }, [sales, loaded, pushSlice]);
-  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("expenses", expenses), 500); return () => clearTimeout(t); }, [expenses, loaded, pushSlice]);
-  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("logs", logs), 500); return () => clearTimeout(t); }, [logs, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("items", items), 300); return () => clearTimeout(t); }, [items, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("sales", sales), 300); return () => clearTimeout(t); }, [sales, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("expenses", expenses), 300); return () => clearTimeout(t); }, [expenses, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("logs", logs), 300); return () => clearTimeout(t); }, [logs, loaded, pushSlice]);
 
   // 4) Mirror to a local cache (instant next paint + offline reads + no data loss on close).
-  const dataRef = useRef({ items, sales, expenses, logs });
-  dataRef.current = { items, sales, expenses, logs };
   useEffect(() => {
     if (!loaded) return;
     const writeCache = () => { try { localStorage.setItem(CACHE_KEY, JSON.stringify(dataRef.current)); } catch (e) { console.error("cache write failed", e); } };
@@ -566,6 +588,7 @@ function StoreManager({ user, onLogout }) {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   };
+  notifyRef.current = notify; // let the cloud listener surface errors via the same toast
 
   const resetMyPassword = async () => {
     if (!user?.email) return;
@@ -680,7 +703,12 @@ function StoreManager({ user, onLogout }) {
           <button className="navbtn" style={{ border: "1px solid #2A5A3E", justifyContent: "center" }} onClick={onLogout}>⎋ Logout</button>
         </div>
         <div style={{ fontSize: 11, color: "#6E8A7C", padding: "6px 14px 8px" }}>
-          {user?.email ? <>Signed in as {user.email}.<br /></> : null}Synced to cloud · back up regularly.
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: online ? "#3FB873" : "#C9803A", display: "inline-block" }} />
+            {online ? "Online · syncing live" : "Offline · saved on this device"}
+          </span>
+          <br />
+          {user?.email ? <>Signed in as {user.email}.<br /></> : null}Back up regularly.
         </div>
       </nav>
 
@@ -1017,20 +1045,25 @@ function Inventory({ items, setItems, notify, log }) {
       mrp: +f.mrp || sell, lowAt,
     };
     if (f.id) {
-      const cur = items.find((i) => i.id === f.id);
+      const prevStock = (items.find((i) => i.id === f.id)?.stock) || 0;
       const newStock = Math.max(0, +f.stock || 0);
-      const diff = newStock - (cur.stock || 0);
-      let updated = { ...cur, ...base, updatedAt: todayStr() };
-      // Reconcile batches with the edited stock: grow → new batch, shrink → FIFO deplete.
-      if (diff > 0) updated = addBatch(updated, diff, f.expiry, todayStr());
-      else if (diff < 0) updated = removeStock(updated, -diff, todayStr());
-      setItems(items.map((i) => (i.id === f.id ? updated : i)));
-      log("inventory", `Edited item “${base.name}”` + (diff ? ` · stock ${cur.stock || 0}→${newStock}` : ""));
+      const diff = newStock - prevStock;
+      // Functional updater so a live cloud snapshot landing mid-edit can't drop other items.
+      setItems((list) => list.map((i) => {
+        if (i.id !== f.id) return i;
+        let updated = { ...i, ...base, updatedAt: todayStr() };
+        // Reconcile batches with the edited stock: grow → new batch, shrink → FIFO deplete.
+        if (diff > 0) updated = addBatch(updated, diff, f.expiry, todayStr());
+        else if (diff < 0) updated = removeStock(updated, -diff, todayStr());
+        return updated;
+      }));
+      log("inventory", `Edited item “${base.name}”` + (diff ? ` · stock ${prevStock}→${newStock}` : ""));
       notify("Item updated");
     } else {
       const stock = +f.stock || 0;
       const batches = stock > 0 ? [{ id: uid(), qty: stock, expiry: f.expiry || "", addedOn: todayStr() }] : [];
-      setItems([...items, { ...base, id: uid(), stock, batches, createdAt: todayStr() }]);
+      const newItem = { ...base, id: uid(), stock, batches, createdAt: todayStr() };
+      setItems((list) => [...list, newItem]);
       log("inventory", `Added item “${base.name}” · ${stock} ${base.unit} @ ${INR(sell)}` + (f.expiry ? ` (exp ${f.expiry})` : ""));
       notify("Item added to inventory");
     }
@@ -1040,7 +1073,7 @@ function Inventory({ items, setItems, notify, log }) {
   const doRestock = () => {
     const qty = +restock.qty;
     if (!(qty > 0)) return notify("Enter quantity to add");
-    setItems(items.map((i) => (i.id === restock.id ? addBatch(i, qty, restock.expiry, todayStr()) : i)));
+    setItems((list) => list.map((i) => (i.id === restock.id ? addBatch(i, qty, restock.expiry, todayStr()) : i)));
     log("inventory", `Restocked “${restock.name}” +${qty}` + (restock.expiry ? ` (exp ${restock.expiry})` : ""));
     setRestock(null);
     notify("Stock added");
@@ -1048,7 +1081,7 @@ function Inventory({ items, setItems, notify, log }) {
 
   const del = (i) => {
     if (!confirm("Delete " + i.name + "?")) return;
-    setItems(items.filter((x) => x.id !== i.id));
+    setItems((list) => list.filter((x) => x.id !== i.id));
     log("inventory", `Deleted item “${i.name}”`);
   };
 
@@ -1259,7 +1292,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
   const saveToItem = () => {
     if (!itemId) return notify("Pick an inventory item first to save its barcode");
     if (!code.trim()) return notify("Nothing to save");
-    setItems(items.map((i) => (i.id === itemId ? { ...i, code: code.trim(), updatedAt: todayStr() } : i)));
+    setItems((list) => list.map((i) => (i.id === itemId ? { ...i, code: code.trim(), updatedAt: todayStr() } : i)));
     log("inventory", `Set barcode for “${name}” → ${code.trim()}`);
     notify("Barcode saved to item — it can now be scanned at billing");
   };
@@ -1472,26 +1505,30 @@ function RawData({ items, setItems, setSales, notify, log }) {
   };
 
   const commitInventory = () => {
-    const agg = aggregateRows();
+    const counts = aggregateRows();
+    const names = new Set(items.map((i) => i.name.toLowerCase()));
     let added = 0, updated = 0;
-    // Map to NEW objects (never mutate existing state items in place).
-    const next = items.map((i) => {
-      const a = agg.get(i.name.toLowerCase());
-      if (!a) return i;
-      agg.delete(i.name.toLowerCase());
-      updated++;
-      return { ...addBatch(i, a.qty, "", todayStr()), buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
-    });
-    agg.forEach((a) => {
-      const sell = a.sell || (a.buy ? Math.round(a.buy * 1.15) : 0);
-      next.push({
-        id: uid(), name: a.name, code: "", category: "Other", unit: a.unit, icon: iconFor("Other"),
-        buyPrice: a.buy, sellPrice: sell, mrp: sell, stock: a.qty, lowAt: 5,
-        batches: a.qty > 0 ? [{ id: uid(), qty: a.qty, expiry: "", addedOn: todayStr() }] : [], createdAt: todayStr(),
+    counts.forEach((_, key) => (names.has(key) ? updated++ : added++));
+    // Functional updater (rebuilds the aggregate per call so it stays correct even if a live
+    // cloud snapshot changed `items` since the import was previewed). Always NEW objects.
+    setItems((list) => {
+      const agg = aggregateRows();
+      const next = list.map((i) => {
+        const a = agg.get(i.name.toLowerCase());
+        if (!a) return i;
+        agg.delete(i.name.toLowerCase());
+        return { ...addBatch(i, a.qty, "", todayStr()), buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
       });
-      added++;
+      agg.forEach((a) => {
+        const sell = a.sell || (a.buy ? Math.round(a.buy * 1.15) : 0);
+        next.push({
+          id: uid(), name: a.name, code: "", category: "Other", unit: a.unit, icon: iconFor("Other"),
+          buyPrice: a.buy, sellPrice: sell, mrp: sell, stock: a.qty, lowAt: 5,
+          batches: a.qty > 0 ? [{ id: uid(), qty: a.qty, expiry: "", addedOn: todayStr() }] : [], createdAt: todayStr(),
+        });
+      });
+      return next;
     });
-    setItems(next);
     log("import", `Imported to inventory (${source || "manual"}): ${added} new, ${updated} restocked`);
     reset();
     notify(`Inventory updated — ${added} new, ${updated} restocked`);
@@ -2074,7 +2111,8 @@ function Expenses({ expenses, setExpenses, notify, log }) {
   const addExp = () => {
     if (!exp.desc.trim() || !(+exp.amount > 0)) return notify("Enter a description and a positive amount");
     const date = exp.date || todayStr();
-    setExpenses([...expenses, { id: uid(), date, desc: exp.desc.trim(), amount: +exp.amount }]);
+    const row = { id: uid(), date, desc: exp.desc.trim(), amount: +exp.amount };
+    setExpenses((list) => [...list, row]);
     log("expense", `Expense ${INR(+exp.amount)} — ${exp.desc.trim()}` + (date !== todayStr() ? ` (dated ${date})` : ""));
     setExp({ desc: "", amount: "", date: todayStr() });
     notify("Expense recorded");
@@ -2082,7 +2120,7 @@ function Expenses({ expenses, setExpenses, notify, log }) {
 
   const del = (e) => {
     if (!confirm(`Delete expense “${e.desc}” (${INR(e.amount)})?`)) return;
-    setExpenses(expenses.filter((x) => x.id !== e.id));
+    setExpenses((list) => list.filter((x) => x.id !== e.id));
     log("expense", `Deleted expense ${INR(e.amount)} — ${e.desc}`);
     notify("Expense deleted");
   };
