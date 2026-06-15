@@ -1078,6 +1078,7 @@ function Inventory({ items, setItems, notify, log }) {
   const [form, setForm] = useState(null); // null | {…item, id?}
   const [restock, setRestock] = useState(null); // {id, name, qty, expiry}
   const [open, setOpen] = useState(null); // expanded item id (batch detail)
+  const [sort, setSort] = useState({ key: "name", dir: 1 }); // dir: 1 asc, -1 desc
 
   const filtered = items.filter((i) => {
     const term = q.trim().toLowerCase();
@@ -1086,6 +1087,32 @@ function Inventory({ items, setItems, notify, log }) {
       (i.name.toLowerCase().includes(term) || (i.code || "").toLowerCase().includes(term))
     );
   });
+
+  // Sortable columns. Click a header to sort by it; click again to flip direction.
+  const SORT_VALUE = {
+    name: (i) => (i.name || "").toLowerCase(),
+    category: (i) => (i.category || "").toLowerCase(),
+    createdAt: (i) => i.createdAt || "",
+    buyPrice: (i) => +i.buyPrice || 0,
+    sellPrice: (i) => +i.sellPrice || 0,
+    margin: (i) => (+i.sellPrice || 0) - (+i.buyPrice || 0),
+    stock: (i) => +i.stock || 0,
+  };
+  const sorted = useMemo(() => {
+    const val = SORT_VALUE[sort.key] || SORT_VALUE.name;
+    return [...filtered].sort((a, b) => {
+      const x = val(a), y = val(b);
+      return (x < y ? -1 : x > y ? 1 : 0) * sort.dir;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, sort]);
+  const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: -s.dir } : { key, dir: 1 }));
+  const arrow = (key) => (sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
+  const SortTh = ({ k, label, align }) => (
+    <th onClick={() => toggleSort(k)} style={{ cursor: "pointer", textAlign: align || "left", userSelect: "none", whiteSpace: "nowrap" }} title="Click to sort">
+      {label}{arrow(k)}
+    </th>
+  );
 
   const save = () => {
     const f = form;
@@ -1179,6 +1206,14 @@ function Inventory({ items, setItems, notify, log }) {
     notify("All stock set to 0");
   };
 
+  const zeroAllPrices = () => {
+    if (!items.length) return notify("No items to reset");
+    if (!confirm("Set buy and sell price to 0 for ALL items? Names and stock are kept. This syncs to all devices.")) return;
+    setItems((list) => list.map((i) => ({ ...i, buyPrice: 0, sellPrice: 0, mrp: 0, updatedAt: todayStr() })));
+    log("inventory", "Reset all buy/sell prices to 0");
+    notify("All prices set to 0");
+  };
+
   const stop = (e) => e.stopPropagation();
 
   return (
@@ -1190,6 +1225,7 @@ function Inventory({ items, setItems, notify, log }) {
           </button>
         )}{" "}
         <button className="btn" onClick={zeroAllStock} title="Set stock to 0 for every item">↺ Zero all stock</button>{" "}
+        <button className="btn" onClick={zeroAllPrices} title="Set buy and sell price to 0 for every item">₹ Zero all prices</button>{" "}
         <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
       </Header>
 
@@ -1204,10 +1240,19 @@ function Inventory({ items, setItems, notify, log }) {
       <section style={S.panel}>
         <table className="tbl">
           <thead>
-            <tr><th>Item</th><th>Category</th><th>Added</th><th style={{ textAlign: "right" }}>Buy</th><th style={{ textAlign: "right" }}>Sell</th><th style={{ textAlign: "right" }}>Margin</th><th style={{ textAlign: "right" }}>Stock</th><th></th></tr>
+            <tr>
+              <SortTh k="name" label="Item" />
+              <SortTh k="category" label="Category" />
+              <SortTh k="createdAt" label="Added" />
+              <SortTh k="buyPrice" label="Buy" align="right" />
+              <SortTh k="sellPrice" label="Sell" align="right" />
+              <SortTh k="margin" label="Margin" align="right" />
+              <SortTh k="stock" label="Stock" align="right" />
+              <th></th>
+            </tr>
           </thead>
           <tbody>
-            {filtered.map((i) => {
+            {sorted.map((i) => {
               const dte = daysToExpiry(i);
               const isOpen = open === i.id;
               return (
