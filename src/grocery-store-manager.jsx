@@ -1171,6 +1171,14 @@ function Inventory({ items, setItems, notify, log }) {
     notify("Duplicates merged");
   };
 
+  const zeroAllStock = () => {
+    if (!items.length) return notify("No items to reset");
+    if (!confirm("Set stock to 0 for ALL items? Every batch is cleared. Item names and prices are kept. This syncs to all devices.")) return;
+    setItems((list) => list.map((i) => ({ ...i, stock: 0, batches: [], updatedAt: todayStr() })));
+    log("inventory", "Reset all item stock to 0");
+    notify("All stock set to 0");
+  };
+
   const stop = (e) => e.stopPropagation();
 
   return (
@@ -1181,6 +1189,7 @@ function Inventory({ items, setItems, notify, log }) {
             🧹 Remove duplicates ({dupeExtras})
           </button>
         )}{" "}
+        <button className="btn" onClick={zeroAllStock} title="Set stock to 0 for every item">↺ Zero all stock</button>{" "}
         <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
       </Header>
 
