@@ -35,7 +35,41 @@ const LOGO_SRC = BASE + "logo.jpg";
 const PAYMENT_QR_SRC = BASE + "payment-qr.jpg";
 const assetUrl = (p) => (typeof location !== "undefined" ? location.origin : "") + p;
 
-// Open a thermal-style receipt in a new window and trigger the print dialog.
+// Print an HTML document via a hidden iframe. Mobile browsers block window.open popups,
+// so the old "open a new window and print" approach silently failed on phones — an iframe
+// prints from within the current page (the click is a user gesture) and works everywhere.
+function printHtml(html, title) {
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("aria-hidden", "true");
+  Object.assign(iframe.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
+
+  let cleaned = false;
+  const cleanup = () => { if (cleaned) return; cleaned = true; try { document.body.removeChild(iframe); } catch { /* already gone */ } };
+
+  iframe.onload = () => {
+    // Small delay so logo/QR images finish painting before the print dialog opens.
+    setTimeout(() => {
+      try {
+        const win = iframe.contentWindow;
+        win.focus();
+        win.onafterprint = cleanup;
+        win.print();
+        setTimeout(cleanup, 60000); // safety net: afterprint doesn't fire on every mobile browser
+      } catch (err) {
+        console.error("print failed", err);
+        cleanup();
+        const w = window.open("", "_blank"); // last-ditch fallback
+        if (w) { w.document.write(html); w.document.close(); }
+      }
+    }, 250);
+  };
+
+  document.body.appendChild(iframe);
+  // srcdoc gives a single load event after content + images, and works on mobile Safari/Chrome.
+  iframe.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title || "Print")}</title></head><body>${html}</body></html>`;
+}
+
+// Build a thermal-style receipt and send it to the printer.
 function printReceipt(sale) {
   const rows = sale.lines
     .map(
@@ -43,11 +77,8 @@ function printReceipt(sale) {
         `<tr><td>${escapeHtml(l.name)}</td><td class="c">${l.qty}</td><td class="r">${INR(l.amount)}</td></tr>`
     )
     .join("");
-  const w = window.open("", "_blank", "width=340,height=620");
-  if (!w) return; // popup blocked
-  w.document.write(
-    `<!doctype html><html><head><meta charset="utf-8"><title>Receipt</title>
-    <style>body{font-family:'Courier New',monospace;padding:10px;width:280px;color:#000}
+  printHtml(
+    `<style>body{font-family:'Courier New',monospace;padding:10px;width:280px;color:#000}
     h2{text-align:center;margin:4px 0}.meta{text-align:center;font-size:11px}
     .logo{display:block;margin:0 auto 2px;height:46px;object-fit:contain}
     table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
@@ -57,7 +88,6 @@ function printReceipt(sale) {
     .pay{text-align:center;margin-top:10px;border-top:1px dashed #000;padding-top:8px}
     .pay img{width:150px;height:150px;object-fit:contain}
     .pay .lbl{font-size:11px;font-weight:bold;margin-top:2px}</style>
-    </head><body>
     <img class="logo" src="${assetUrl(LOGO_SRC)}" alt="" onerror="this.style.display='none'" />
     <h2>${escapeHtml(STORE.name)}</h2>
     <div class="meta">${escapeHtml(STORE.address)}</div>
@@ -70,11 +100,9 @@ function printReceipt(sale) {
     <div class="pay">
       <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
       <div class="lbl">Scan to Pay · PhonePe / UPI</div>
-    </div>
-    <script>window.onload=function(){setTimeout(function(){window.print()},250)}</scr` + `ipt>
-    </body></html>`
+    </div>`,
+    "Receipt"
   );
-  w.document.close();
 }
 const UNITS = ["pc", "kg", "g", "L", "ml", "packet", "dozen", "box"];
 const CATEGORIES = [
@@ -1018,6 +1046,32 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
 // ---------- Inventory ----------
 const blankItem = { name: "", code: "", category: CATEGORIES[0], unit: "pc", icon: "", buyPrice: "", sellPrice: "", mrp: "", stock: "", lowAt: 5, expiry: "" };
 
+// Normalised item name for duplicate detection (trim, lowercase, collapse inner spaces).
+const normName = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+
+// Merge several same-name items into one, preserving stock: sum quantities, combine all
+// batches, and keep the most complete pricing/category fields. Keeps the oldest item's id.
+function mergeItemGroup(group) {
+  const sorted = [...group].sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  const primary = sorted[0];
+  const pick = (key) => sorted.map((x) => x[key]).find((v) => v != null && v !== "" && v !== 0);
+  return {
+    ...primary,
+    name: (primary.name || "").trim(),
+    code: pick("code") || "",
+    category: primary.category || pick("category") || "Other",
+    unit: primary.unit || pick("unit") || "pc",
+    icon: primary.icon || iconFor(primary.category),
+    buyPrice: pick("buyPrice") || 0,
+    sellPrice: pick("sellPrice") || primary.sellPrice || 0,
+    mrp: pick("mrp") || pick("sellPrice") || 0,
+    lowAt: Math.max(0, ...sorted.map((x) => +x.lowAt || 0)),
+    stock: sorted.reduce((a, x) => a + (+x.stock || 0), 0),
+    batches: sorted.flatMap((x) => (Array.isArray(x.batches) ? x.batches : [])),
+    updatedAt: todayStr(),
+  };
+}
+
 function Inventory({ items, setItems, notify, log }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("All");
@@ -1039,6 +1093,14 @@ function Inventory({ items, setItems, notify, log }) {
     const buy = +f.buyPrice, sell = +f.sellPrice, lowAt = +f.lowAt || 0;
     if (!(sell > 0)) return notify("Selling price must be more than 0");
     if (buy < 0 || sell < 0) return notify("Prices cannot be negative");
+    // Block duplicate names (case-insensitive). On edit, ignore the item being edited.
+    const nn = normName(f.name);
+    const clash = items.find((i) => normName(i.name) === nn && i.id !== f.id);
+    if (clash) {
+      return notify(f.id
+        ? `Another item is already named “${clash.name}”.`
+        : `“${clash.name}” already exists — use Restock or edit it instead.`);
+    }
     const base = {
       name: f.name.trim(), code: (f.code || "").trim(), category: f.category, unit: f.unit,
       icon: (f.icon || "").trim() || iconFor(f.category), buyPrice: buy || 0, sellPrice: sell,
@@ -1085,11 +1147,40 @@ function Inventory({ items, setItems, notify, log }) {
     log("inventory", `Deleted item “${i.name}”`);
   };
 
+  // How many extra (duplicate-named) entries exist right now.
+  const dupeExtras = useMemo(() => {
+    const seen = new Set();
+    let extra = 0;
+    for (const i of items) { const k = normName(i.name); seen.has(k) ? extra++ : seen.add(k); }
+    return extra;
+  }, [items]);
+
+  const removeDuplicates = () => {
+    if (dupeExtras === 0) return notify("No duplicate items found");
+    if (!confirm(`Merge ${dupeExtras} duplicate entr${dupeExtras === 1 ? "y" : "ies"} into single items? Stock and batches are combined — nothing is lost.`)) return;
+    setItems((list) => {
+      const groups = new Map();
+      for (const i of list) {
+        const k = normName(i.name);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(i);
+      }
+      return [...groups.values()].map((g) => (g.length === 1 ? g[0] : mergeItemGroup(g)));
+    });
+    log("inventory", `Removed ${dupeExtras} duplicate item entr${dupeExtras === 1 ? "y" : "ies"}`);
+    notify("Duplicates merged");
+  };
+
   const stop = (e) => e.stopPropagation();
 
   return (
     <div>
       <Header title="Inventory" sub={items.length + " items · click a row to see batches & expiry"}>
+        {dupeExtras > 0 && (
+          <button className="btn" onClick={removeDuplicates} title="Merge items that share the same name">
+            🧹 Remove duplicates ({dupeExtras})
+          </button>
+        )}{" "}
         <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
       </Header>
 
@@ -1312,9 +1403,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
       ${priceLine ? `<div class="price">${priceLine}</div>` : ""}
       <div class="dates">${dateLine}</div>
     </div>`;
-    const w = window.open("", "_blank");
-    if (!w) return notify("Allow pop-ups to print labels");
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Barcode labels</title>
+    printHtml(`
       <style>
         @page { margin: 6mm; }
         body { margin:0; font-family: Arial, Helvetica, sans-serif; }
@@ -1328,13 +1417,10 @@ function BarcodeCreator({ items, setItems, notify, log }) {
         .price { font-size:8pt; font-weight:bold; line-height:1; }
         .dates { font-size:5.5pt; color:#333; line-height:1; }
         @media print { .lbl { border-color:#e5e5e5; } }
-      </style></head><body>
-      <div class="sheet">${one.repeat(n)}</div>
-      <script>window.onload=function(){window.print()}</scr` + `ipt>
-      </body></html>`);
-    w.document.close();
+      </style>
+      <div class="sheet">${one.repeat(n)}</div>`, "Barcode labels");
     log("inventory", `Printed ${n} barcode label(s) for “${name || code.trim()}”`);
-    notify(`Opened ${n} label(s) for printing`);
+    notify(`Sent ${n} label(s) to the printer`);
   };
 
   const addExpiry = (days) => {
