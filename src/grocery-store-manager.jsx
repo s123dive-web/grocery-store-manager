@@ -4,7 +4,7 @@ import {
   XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
 } from "recharts";
 import JsBarcode from "jsbarcode";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail, EmailAuthProvider, reauthenticateWithCredential } from "firebase/auth";
 import { auth } from "./lib/firebase.js";
 import {
   toMap, mapToArray, isLegacyShape, buildSliceUpdate, mergeRemote,
@@ -704,6 +704,7 @@ function StoreManager({ user, onLogout }) {
           ["raw", "⇪", "Data Import"],
           ["barcode", "▥", "Barcode Creator"],
           ["logs", "❑", "Activity Log"],
+          ["admin", "⚙", "Admin"],
         ].map(([k, ic, label]) => (
           <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
             <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
@@ -764,6 +765,8 @@ function StoreManager({ user, onLogout }) {
           <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "logs" ? (
           <Logs logs={logs} setLogs={setLogs} notify={notify} />
+        ) : tab === "admin" ? (
+          <Admin items={items} setItems={setItems} setSales={setSales} setExpenses={setExpenses} setLogs={setLogs} user={user} notify={notify} log={addLog} />
         ) : (
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         )}
@@ -1174,58 +1177,11 @@ function Inventory({ items, setItems, notify, log }) {
     log("inventory", `Deleted item “${i.name}”`);
   };
 
-  // How many extra (duplicate-named) entries exist right now.
-  const dupeExtras = useMemo(() => {
-    const seen = new Set();
-    let extra = 0;
-    for (const i of items) { const k = normName(i.name); seen.has(k) ? extra++ : seen.add(k); }
-    return extra;
-  }, [items]);
-
-  const removeDuplicates = () => {
-    if (dupeExtras === 0) return notify("No duplicate items found");
-    if (!confirm(`Merge ${dupeExtras} duplicate entr${dupeExtras === 1 ? "y" : "ies"} into single items? Stock and batches are combined — nothing is lost.`)) return;
-    setItems((list) => {
-      const groups = new Map();
-      for (const i of list) {
-        const k = normName(i.name);
-        if (!groups.has(k)) groups.set(k, []);
-        groups.get(k).push(i);
-      }
-      return [...groups.values()].map((g) => (g.length === 1 ? g[0] : mergeItemGroup(g)));
-    });
-    log("inventory", `Removed ${dupeExtras} duplicate item entr${dupeExtras === 1 ? "y" : "ies"}`);
-    notify("Duplicates merged");
-  };
-
-  const zeroAllStock = () => {
-    if (!items.length) return notify("No items to reset");
-    if (!confirm("Set stock to 0 for ALL items? Every batch is cleared. Item names and prices are kept. This syncs to all devices.")) return;
-    setItems((list) => list.map((i) => ({ ...i, stock: 0, batches: [], updatedAt: todayStr() })));
-    log("inventory", "Reset all item stock to 0");
-    notify("All stock set to 0");
-  };
-
-  const zeroAllPrices = () => {
-    if (!items.length) return notify("No items to reset");
-    if (!confirm("Set buy and sell price to 0 for ALL items? Names and stock are kept. This syncs to all devices.")) return;
-    setItems((list) => list.map((i) => ({ ...i, buyPrice: 0, sellPrice: 0, mrp: 0, updatedAt: todayStr() })));
-    log("inventory", "Reset all buy/sell prices to 0");
-    notify("All prices set to 0");
-  };
-
   const stop = (e) => e.stopPropagation();
 
   return (
     <div>
-      <Header title="Inventory" sub={items.length + " items · click a row to see batches & expiry"}>
-        {dupeExtras > 0 && (
-          <button className="btn" onClick={removeDuplicates} title="Merge items that share the same name">
-            🧹 Remove duplicates ({dupeExtras})
-          </button>
-        )}{" "}
-        <button className="btn" onClick={zeroAllStock} title="Set stock to 0 for every item">↺ Zero all stock</button>{" "}
-        <button className="btn" onClick={zeroAllPrices} title="Set buy and sell price to 0 for every item">₹ Zero all prices</button>{" "}
+      <Header title="Inventory" sub={items.length + " items · click a column header to sort · click a row for batches"}>
         <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
       </Header>
 
@@ -2313,6 +2269,156 @@ function Expenses({ expenses, setExpenses, notify, log }) {
 }
 
 // ---------- small components ----------
+// ---------- Admin (password-gated bulk / destructive operations) ----------
+// Every action requires: confirm → confirm again → re-enter the account password
+// (verified against Firebase Auth). Only on a successful re-auth does the action run.
+function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, log }) {
+  const [pending, setPending] = useState(null); // the chosen operation
+  const [step, setStep] = useState(1); // 1 = first confirm, 2 = password
+  const [pwd, setPwd] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const dupeExtras = useMemo(() => {
+    const seen = new Set();
+    let extra = 0;
+    for (const i of items) { const k = normName(i.name); seen.has(k) ? extra++ : seen.add(k); }
+    return extra;
+  }, [items]);
+
+  const ops = [
+    { key: "zeroStock", label: "Zero all stock", group: "Inventory",
+      desc: "Set stock to 0 and clear every batch for all items. Names and prices are kept.",
+      apply: () => setItems((l) => l.map((i) => ({ ...i, stock: 0, batches: [], updatedAt: todayStr() }))),
+      logMsg: "Reset all stock to 0", toast: "All stock set to 0" },
+    { key: "zeroBuy", label: "Zero all buy prices", group: "Inventory",
+      desc: "Set the buy (cost) price to 0 for every item.",
+      apply: () => setItems((l) => l.map((i) => ({ ...i, buyPrice: 0, updatedAt: todayStr() }))),
+      logMsg: "Reset all buy prices to 0", toast: "All buy prices set to 0" },
+    { key: "zeroSell", label: "Zero all sell prices", group: "Inventory",
+      desc: "Set the sell price and MRP to 0 for every item.",
+      apply: () => setItems((l) => l.map((i) => ({ ...i, sellPrice: 0, mrp: 0, updatedAt: todayStr() }))),
+      logMsg: "Reset all sell prices to 0", toast: "All sell prices set to 0" },
+    { key: "zeroPrices", label: "Zero all prices (buy + sell)", group: "Inventory",
+      desc: "Set buy price, sell price and MRP to 0 for every item.",
+      apply: () => setItems((l) => l.map((i) => ({ ...i, buyPrice: 0, sellPrice: 0, mrp: 0, updatedAt: todayStr() }))),
+      logMsg: "Reset all prices to 0", toast: "All prices set to 0" },
+    { key: "dedupe", label: "Merge duplicate items" + (dupeExtras ? ` (${dupeExtras})` : ""), group: "Inventory",
+      desc: "Combine items that share the same name into one entry — stock and batches are summed, nothing is lost.",
+      disabled: dupeExtras === 0,
+      apply: () => setItems((l) => {
+        const g = new Map();
+        for (const i of l) { const k = normName(i.name); if (!g.has(k)) g.set(k, []); g.get(k).push(i); }
+        return [...g.values()].map((x) => (x.length === 1 ? x[0] : mergeItemGroup(x)));
+      }),
+      logMsg: "Merged duplicate items", toast: "Duplicates merged" },
+    { key: "delItems", label: "Delete ALL inventory items", group: "Danger zone", danger: true,
+      desc: "Permanently remove every item from inventory. Sales history is kept.",
+      apply: () => setItems([]), logMsg: "Deleted all inventory items", toast: "All items deleted" },
+    { key: "clrSales", label: "Clear all sales history", group: "Danger zone", danger: true,
+      desc: "Permanently delete every recorded sale. Inventory stock is NOT changed.",
+      apply: () => setSales([]), logMsg: "Cleared all sales history", toast: "Sales history cleared" },
+    { key: "clrExp", label: "Clear all expenses", group: "Danger zone", danger: true,
+      desc: "Permanently delete every expense entry.",
+      apply: () => setExpenses([]), logMsg: "Cleared all expenses", toast: "Expenses cleared" },
+    { key: "clrLogs", label: "Clear activity log", group: "Danger zone",
+      desc: "Delete all activity-log entries.",
+      apply: () => setLogs([]), logMsg: "Cleared activity log", toast: "Activity log cleared" },
+    { key: "factory", label: "Factory reset", group: "Danger zone", danger: true,
+      desc: "Replace inventory with the fresh starter catalogue (all at 0 stock) and delete ALL sales, expenses and logs. Cannot be undone.",
+      apply: () => {
+        setItems(SEED_ITEMS.map((i) => ({ ...i, id: uid(), stock: 0, batches: [] })));
+        setSales([]); setExpenses([]); setLogs([]);
+      },
+      logMsg: "Factory reset performed", toast: "Factory reset complete" },
+  ];
+
+  const groups = [...new Set(ops.map((o) => o.group))];
+  const choose = (op) => { if (op.disabled) return; setPending(op); setStep(1); setPwd(""); setErr(""); };
+  const close = () => { setPending(null); setStep(1); setPwd(""); setErr(""); setBusy(false); };
+
+  const confirmRun = async () => {
+    if (!pwd) return setErr("Enter your account password.");
+    if (!user?.email) return setErr("No signed-in account to verify against.");
+    setBusy(true); setErr("");
+    try {
+      const cred = EmailAuthProvider.credential(user.email, pwd);
+      await reauthenticateWithCredential(auth.currentUser, cred);
+    } catch (e) {
+      setBusy(false);
+      setErr(e?.code === "auth/too-many-requests"
+        ? "Too many attempts — please wait a minute and retry."
+        : "Incorrect password — operation cancelled.");
+      return;
+    }
+    try { pending.apply(); log("admin", pending.logMsg); notify(pending.toast); }
+    catch (e) { console.error("admin op failed", e); notify("⚠ Operation failed."); }
+    close();
+  };
+
+  return (
+    <div>
+      <Header title="Admin" sub="Bulk & destructive operations · double-confirm + password required" />
+      {groups.map((grp) => (
+        <section key={grp} style={{ ...S.panel, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".06em", color: grp === "Danger zone" ? "#B23B2E" : "#6B7E74", marginBottom: 6 }}>{grp}</div>
+          {ops.filter((o) => o.group === grp).map((op) => (
+            <div key={op.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "10px 0", borderTop: "1px solid #EAF0EA" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, color: op.danger ? "#B23B2E" : "#10331F" }}>{op.label}</div>
+                <div style={{ fontSize: 12.5, color: "#5E7468" }}>{op.desc}</div>
+              </div>
+              <button
+                className="btn"
+                disabled={op.disabled}
+                onClick={() => choose(op)}
+                style={{ flex: "0 0 auto", opacity: op.disabled ? 0.5 : 1, ...(op.danger ? { borderColor: "#E2B6B0", color: "#B23B2E" } : {}) }}
+              >
+                Run
+              </button>
+            </div>
+          ))}
+        </section>
+      ))}
+
+      {pending && (
+        <Modal title={step === 1 ? "Confirm operation" : "Enter password to confirm"} onClose={close}>
+          {step === 1 ? (
+            <>
+              <p style={{ marginTop: 0, fontWeight: 700, color: pending.danger ? "#B23B2E" : "#10331F" }}>{pending.label}</p>
+              <p style={{ color: "#5E7468", fontSize: 13 }}>{pending.desc}</p>
+              <p style={{ color: pending.danger ? "#B23B2E" : "#5E7468", fontSize: 13 }}>
+                This applies to all signed-in devices and may not be reversible. Continue?
+              </p>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
+                <button className="btn" onClick={close}>Cancel</button>
+                <button className="btn primary" onClick={() => { setStep(2); setErr(""); }}>Yes, continue</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p style={{ marginTop: 0, fontSize: 13, color: "#5E7468" }}>
+                Final step. Enter the password for <b>{user?.email}</b> to run <b>{pending.label}</b>.
+              </p>
+              <input
+                className="input" type="password" autoFocus placeholder="Account password"
+                value={pwd} onChange={(e) => setPwd(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmRun(); }}
+                style={{ width: "100%", boxSizing: "border-box" }}
+              />
+              {err && <div style={{ color: "#B23B2E", fontSize: 12.5, marginTop: 8 }}>{err}</div>}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
+                <button className="btn" onClick={close} disabled={busy}>Cancel</button>
+                <button className="btn primary" onClick={confirmRun} disabled={busy}>{busy ? "Verifying…" : "Confirm & run"}</button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 const Header = ({ title, sub, children }) => (
   <div style={{ display: "flex", alignItems: "flex-end", marginBottom: 18, gap: 12 }}>
     <div>
