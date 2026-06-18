@@ -559,14 +559,14 @@ function StoreManager({ user, onLogout }) {
           if (isLegacyShape(val, theirs)) {
             overwriteSlice(slice, theirs).catch((e) => console.error("migrate failed", slice, e));
           }
-          // Reconcile the cloud snapshot with any local edits not yet pushed.
-          const ours = toMap(dataRef.current[slice]);
-          const merged = synced.current[slice]
-            ? mergeRemote(lastRemote.current[slice], theirs, ours)
-            : theirs;
+          const base = lastRemote.current[slice];
+          const wasSynced = synced.current[slice];
           lastRemote.current[slice] = theirs;
           synced.current[slice] = true;
-          setter(mapToArray(slice, merged));
+          // Merge against the TRUE current state via the functional updater — NOT a ref that
+          // may lag a just-dispatched local edit by a render. This is what stops an incoming
+          // snapshot from silently reverting an edit/restock/delete made a moment earlier.
+          setter((curr) => mapToArray(slice, wasSynced ? mergeRemote(base, theirs, toMap(curr)) : theirs));
         },
         (err) => {
           console.error("sync read failed", slice, err);
@@ -1111,8 +1111,9 @@ function Inventory({ items, setItems, notify, log }) {
   }, [filtered, sort]);
   const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: -s.dir } : { key, dir: 1 }));
   const arrow = (key) => (sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
-  const SortTh = ({ k, label, align }) => (
-    <th onClick={() => toggleSort(k)} style={{ cursor: "pointer", textAlign: align || "left", userSelect: "none", whiteSpace: "nowrap" }} title="Click to sort">
+  // Plain element helper (not a nested component) so header cells don't remount each render.
+  const sortTh = (k, label, align) => (
+    <th key={k} onClick={() => toggleSort(k)} style={{ cursor: "pointer", textAlign: align || "left", userSelect: "none", whiteSpace: "nowrap" }} title="Click to sort">
       {label}{arrow(k)}
     </th>
   );
@@ -1137,19 +1138,20 @@ function Inventory({ items, setItems, notify, log }) {
       mrp: +f.mrp || sell, lowAt,
     };
     if (f.id) {
-      const prevStock = (items.find((i) => i.id === f.id)?.stock) || 0;
       const newStock = Math.max(0, +f.stock || 0);
-      const diff = newStock - prevStock;
-      // Functional updater so a live cloud snapshot landing mid-edit can't drop other items.
+      const prevForLog = (items.find((i) => i.id === f.id)?.stock) || 0;
+      // Functional updater so a live cloud snapshot landing mid-edit can't drop other items;
+      // diff is taken from the LIVE stock so reconciliation is correct even if it just changed.
       setItems((list) => list.map((i) => {
         if (i.id !== f.id) return i;
+        const diff = newStock - (i.stock || 0);
         let updated = { ...i, ...base, updatedAt: todayStr() };
         // Reconcile batches with the edited stock: grow → new batch, shrink → FIFO deplete.
         if (diff > 0) updated = addBatch(updated, diff, f.expiry, todayStr());
         else if (diff < 0) updated = removeStock(updated, -diff, todayStr());
         return updated;
       }));
-      log("inventory", `Edited item “${base.name}”` + (diff ? ` · stock ${prevStock}→${newStock}` : ""));
+      log("inventory", `Edited item “${base.name}”` + (newStock !== prevForLog ? ` · stock ${prevForLog}→${newStock}` : ""));
       notify("Item updated");
     } else {
       const stock = +f.stock || 0;
@@ -1197,13 +1199,13 @@ function Inventory({ items, setItems, notify, log }) {
         <table className="tbl">
           <thead>
             <tr>
-              <SortTh k="name" label="Item" />
-              <SortTh k="category" label="Category" />
-              <SortTh k="createdAt" label="Added" />
-              <SortTh k="buyPrice" label="Buy" align="right" />
-              <SortTh k="sellPrice" label="Sell" align="right" />
-              <SortTh k="margin" label="Margin" align="right" />
-              <SortTh k="stock" label="Stock" align="right" />
+              {sortTh("name", "Item")}
+              {sortTh("category", "Category")}
+              {sortTh("createdAt", "Added")}
+              {sortTh("buyPrice", "Buy", "right")}
+              {sortTh("sellPrice", "Sell", "right")}
+              {sortTh("margin", "Margin", "right")}
+              {sortTh("stock", "Stock", "right")}
               <th></th>
             </tr>
           </thead>
