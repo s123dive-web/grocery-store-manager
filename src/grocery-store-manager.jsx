@@ -1589,7 +1589,9 @@ function RawData({ items, setItems, setSales, notify, log }) {
     rows.forEach((r) => {
       const key = r.name.trim().toLowerCase();
       if (!key) return;
-      const buy = +r.buyPrice || 0, sell = +r.sellPrice || 0, qty = +r.qty || 0, amount = +r.amount || 0;
+      const buy = +r.buyPrice || 0, sell = +r.sellPrice || 0, qty = +r.qty || 0;
+      // Fall back to qty × unit price when no explicit line amount was given.
+      const amount = +r.amount || (sell ? sell * qty : 0);
       const prev = agg.get(key);
       if (prev) {
         prev.qty += qty; prev.amount += amount;
@@ -1696,7 +1698,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
           <button className="btn" style={{ width: "100%", marginTop: 8 }} onClick={processPaste}>Process pasted data</button>
           {err && <div style={{ color: "#C44536", fontSize: 13, marginTop: 10 }}>{err}</div>}
           <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 12, lineHeight: 1.5 }}>
-            Columns are auto-detected from headers (name / qty / buy / sell / amount). No headers? Columns are read left-to-right as name, qty, price.
+            Columns are auto-detected from headers (name / qty / buy / sell / amount). No headers? The name is read first, then numbers fill in as qty, buy, sell, amount — so 1 number is qty, 2 are qty + price, 3 are qty + buy + sell.
           </div>
         </section>
 
@@ -2454,14 +2456,23 @@ const Empty = ({ text, children }) => (
 );
 
 function Modal({ title, children, onClose }) {
+  // Only close when the *press* started on the backdrop itself. Relying on the
+  // click target alone closed the dialog whenever a drag (e.g. selecting digits
+  // in a number field) began inside an input but released on the overlay.
+  const downOnOverlay = useRef(false);
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div style={S.overlay} onClick={onClose} role="dialog" aria-modal="true" aria-label={title}>
-      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
+    <div
+      style={S.overlay}
+      onMouseDown={(e) => { downOnOverlay.current = e.target === e.currentTarget; }}
+      onClick={(e) => { if (e.target === e.currentTarget && downOnOverlay.current) onClose(); }}
+      role="dialog" aria-modal="true" aria-label={title}
+    >
+      <div style={S.modal}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
           <h2 style={{ margin: 0, fontSize: 17 }}>{title}</h2>
           <button className="btn ghost small" style={{ marginLeft: "auto" }} aria-label="Close dialog" onClick={onClose}>✕</button>

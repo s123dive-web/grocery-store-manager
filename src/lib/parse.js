@@ -2,31 +2,63 @@
 // Turns an uploaded file (csv / tsv / txt / xls / xlsx / json / pdf) or pasted
 // text into a normalised list of rows the app can map to inventory or sales:
 //   { name, qty, unit, buyPrice, sellPrice, amount }
+// The goal is to accept messy, real-world data: with or without headers, any
+// common delimiter, currency symbols, nested JSON backups, etc.
 // Everything runs in the browser. PDF text extraction is best-effort.
 import * as XLSX from "xlsx";
 
-const UNITS = ["pc", "kg", "g", "L", "ml", "packet", "dozen", "box"];
+// Loose unit aliases → canonical unit. Lets columnar data say "pcs", "grams", etc.
+const UNIT_ALIASES = {
+  pc: "pc", pcs: "pc", piece: "pc", pieces: "pc", nos: "pc", no: "pc", unit: "pc", units: "pc",
+  kg: "kg", kgs: "kg", kilo: "kg", kilos: "kg", kilogram: "kg", kilograms: "kg",
+  g: "g", gm: "g", gms: "g", gram: "g", grams: "g",
+  l: "L", ltr: "L", litre: "L", litres: "L", liter: "L", liters: "L",
+  ml: "ml",
+  packet: "packet", packets: "packet", pkt: "packet", pkts: "packet", pack: "packet", packs: "packet",
+  dozen: "dozen", doz: "dozen", dz: "dozen",
+  box: "box", boxes: "box", carton: "box", cartons: "box", ctn: "box",
+};
 
 // Header keyword → field. Order matters (more specific first).
 const HEADER_RULES = [
-  ["amount", /\b(amount|total|value|net|line\s*total)\b/i],
-  ["buyPrice", /\b(buy|cost|purchase|wholesale|cp)\b/i],
+  ["amount", /\b(amount|total|value|net|line\s*total|subtotal)\b/i],
+  ["buyPrice", /\b(buy|cost|purchase|wholesale|cp|landing)\b/i],
   ["sellPrice", /\b(sell|sale|mrp|price|selling|rate|sp|unit\s*price)\b/i],
-  ["qty", /\b(qty|quantity|nos|units?|pcs|count)\b/i],
-  ["unit", /\b(unit|uom|measure|packing)\b/i],
-  ["name", /\b(name|item|product|description|particular|goods|details?)\b/i],
+  ["qty", /\b(qty|quantity|nos|units?|pcs|count|stock|balance|on\s*hand|onhand)\b/i],
+  ["unit", /\b(unit|uom|measure|packing|pack)\b/i],
+  ["name", /\b(name|item|product|description|particular|goods|details?|title|sku)\b/i],
 ];
 
+const canonUnit = (s) => UNIT_ALIASES[String(s).trim().toLowerCase()] || "";
+const isUnitToken = (s) => !!UNIT_ALIASES[String(s).trim().toLowerCase()];
+
+// Lenient number for header-mapped columns (we already trust the column).
 const toNum = (v) => {
   if (v == null) return 0;
   const n = Number(String(v).replace(/[^0-9.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
 };
 
+// Strict: is this cell, on its own, essentially a number? Used to decide whether
+// an unlabelled cell is a value or part of the item name. Accepts currency
+// symbols, thousands separators, a trailing "%" or "/-", but rejects anything
+// with letters mixed in ("100g" stays part of the name).
+function numericVal(c) {
+  const s = String(c ?? "").trim();
+  if (!/\d/.test(s)) return { ok: false, n: 0 };
+  const core = s.replace(/[₹$€£,%\s]/g, "").replace(/\/-?$/, "");
+  if (/^-?\d+(\.\d+)?$/.test(core)) return { ok: true, n: Number(core) };
+  return { ok: false, n: 0 };
+}
+
+// Normalise a header label so word-boundary rules also catch camelCase and
+// snake/kebab keys: "buyPrice" → "buy Price", "sell_price" → "sell price".
+const normHeader = (cell) => String(cell ?? "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
+
 function mapHeaderIndices(cells) {
   const idx = { name: -1, qty: -1, unit: -1, buyPrice: -1, sellPrice: -1, amount: -1 };
   cells.forEach((cell, i) => {
-    const c = String(cell ?? "");
+    const c = normHeader(cell);
     for (const [field, re] of HEADER_RULES) {
       if (idx[field] === -1 && re.test(c)) {
         idx[field] = i;
@@ -37,16 +69,58 @@ function mapHeaderIndices(cells) {
   return idx;
 }
 
+// A row is a header only if it names at least one known field AND has no cell
+// that is purely a number (real headers don't carry bare values).
 function looksLikeHeader(cells) {
-  const text = cells.map((c) => String(c ?? "").trim());
-  const anyName = HEADER_RULES.some(([, re]) => text.some((c) => re.test(c)));
-  const numeric = text.filter((c) => c !== "" && Number.isFinite(Number(c.replace(/[^0-9.-]/g, "")))).length;
-  return anyName && numeric < text.length;
+  const text = cells.map((c) => String(c ?? "").trim()).filter((c) => c !== "");
+  if (!text.length) return false;
+  const anyName = HEADER_RULES.some(([, re]) => text.some((c) => re.test(normHeader(c))));
+  const numericCells = text.filter((c) => numericVal(c).ok).length;
+  return anyName && numericCells === 0;
+}
+
+// Infer a row with no header: pull out a unit token and the numeric cells, treat
+// the rest as the name, then assign numbers by how many there are:
+//   1 → qty | 2 → qty, price | 3 → qty, buy, sell | 4+ → qty, buy, sell, amount
+function inferRow(cells) {
+  const parts = (cells || []).map((c) => String(c ?? "").trim()).filter((c) => c !== "");
+  if (!parts.length) return null;
+  let unit = "";
+  const textCells = [];
+  const nums = [];
+  for (const c of parts) {
+    if (!unit && isUnitToken(c)) { unit = canonUnit(c); continue; }
+    const v = numericVal(c);
+    if (v.ok) nums.push(v.n);
+    else textCells.push(c);
+  }
+  const name = textCells.join(" ").trim();
+  if (!name) return null; // numbers with no label aren't a usable item
+
+  let qty = 1, buyPrice = "", sellPrice = "", amount = "";
+  if (nums.length === 1) {
+    qty = nums[0];
+  } else if (nums.length === 2) {
+    qty = nums[0]; sellPrice = nums[1]; amount = nums[1];
+  } else if (nums.length === 3) {
+    qty = nums[0]; buyPrice = nums[1]; sellPrice = nums[2]; amount = nums[2];
+  } else if (nums.length >= 4) {
+    qty = nums[0]; buyPrice = nums[1]; sellPrice = nums[2]; amount = nums[3];
+  }
+  return { name, qty: qty || 1, unit: unit || "pc", buyPrice, sellPrice, amount };
 }
 
 // Core: given a header row + data rows, produce normalised rows.
 function coreMap(headerCells, dataRows, hasHeader) {
-  const idx = hasHeader ? mapHeaderIndices(headerCells) : { name: 0, qty: 1, unit: -1, buyPrice: -1, sellPrice: 2, amount: 2 };
+  if (!hasHeader) {
+    const out = [];
+    for (const row of dataRows) {
+      const r = inferRow(row);
+      if (r) out.push(r);
+    }
+    return out;
+  }
+  const idx = mapHeaderIndices(headerCells);
   const out = [];
   for (const row of dataRows) {
     if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
@@ -56,7 +130,7 @@ function coreMap(headerCells, dataRows, hasHeader) {
     out.push({
       name,
       qty: idx.qty >= 0 ? toNum(row[idx.qty]) || 1 : 1,
-      unit: UNITS.includes(rawUnit) ? rawUnit : "pc",
+      unit: canonUnit(rawUnit) || "pc",
       buyPrice: idx.buyPrice >= 0 ? toNum(row[idx.buyPrice]) : "",
       sellPrice: idx.sellPrice >= 0 ? toNum(row[idx.sellPrice]) : "",
       amount: idx.amount >= 0 ? toNum(row[idx.amount]) : "",
@@ -74,11 +148,31 @@ function matrixToRows(matrix) {
 
 // Array of plain objects (from JSON) → rows.
 function objectsToRows(arr) {
-  const objs = arr.filter((o) => o && typeof o === "object" && !Array.isArray(o));
+  const objs = (arr || []).filter((o) => o && typeof o === "object" && !Array.isArray(o));
   if (!objs.length) return [];
   const header = Array.from(new Set(objs.flatMap((o) => Object.keys(o))));
   const data = objs.map((o) => header.map((k) => o[k]));
   return coreMap(header, data, true);
+}
+
+// Pull the most likely list of records out of arbitrary parsed JSON. Handles a
+// bare array of objects, an array of arrays, and wrapper objects such as the
+// app's own backup ({ items: [...], sales: [...] }) or { data: [...] }.
+function jsonToRows(j) {
+  if (Array.isArray(j)) {
+    if (j.length && j.every((x) => Array.isArray(x))) return matrixToRows(j);
+    return objectsToRows(j);
+  }
+  if (j && typeof j === "object") {
+    const arrKeys = Object.keys(j).filter((k) => Array.isArray(j[k]) && j[k].some((o) => o && typeof o === "object" && !Array.isArray(o)));
+    if (arrKeys.length) {
+      const preferred = ["items", "products", "inventory", "stock", "rows", "data", "records", "lines"];
+      const key = preferred.find((p) => arrKeys.includes(p)) || arrKeys[0];
+      return objectsToRows(j[key]);
+    }
+    return objectsToRows([j]); // a single record object
+  }
+  return [];
 }
 
 function detectDelimiter(line) {
@@ -105,13 +199,27 @@ function splitCsvLine(line, delim) {
   return out.map((c) => c.trim());
 }
 
+// Split one delimiter-less line into cells. Prefer runs of 2+ spaces (printed /
+// PDF columns); failing that, peel trailing numeric tokens off so single-space
+// data like "Parle-G 24 8 10" still becomes [name, 24, 8, 10].
+function splitColumnarLine(line) {
+  const multi = line.split(/\s{2,}/).map((s) => s.trim()).filter(Boolean);
+  if (multi.length > 1) return multi;
+  const m = line.match(/^(.*?\S)((?:\s+[₹$€£]?-?[\d.,]+%?(?:\/-?)?){1,4})\s*$/);
+  if (m) {
+    const nums = m[2].trim().split(/\s+/);
+    return [m[1].trim(), ...nums];
+  }
+  return [line.trim()];
+}
+
 export function parseTextToMatrix(text) {
-  const lines = text.replace(/\r/g, "").split("\n").filter((l) => l.trim() !== "");
+  const lines = text.replace(/\r/g, "").split("\n").map((l) => l.trim()).filter((l) => l !== "");
   if (!lines.length) return [];
-  const delim = detectDelimiter(lines[0]);
+  // Pick a delimiter from whichever line shows one (header line may have none).
+  const delim = lines.map(detectDelimiter).find(Boolean) || null;
   if (delim) return lines.map((l) => splitCsvLine(l, delim));
-  // No delimiter: split on runs of 2+ spaces (common in PDF/printed text).
-  return lines.map((l) => l.trim().split(/\s{2,}/));
+  return lines.map(splitColumnarLine);
 }
 
 // Parse pasted text (JSON or delimited/columnar).
@@ -120,8 +228,7 @@ export function parseRawText(text) {
   if (!t) return [];
   if (t[0] === "[" || t[0] === "{") {
     try {
-      const j = JSON.parse(t);
-      return objectsToRows(Array.isArray(j) ? j : [j]);
+      return jsonToRows(JSON.parse(t));
     } catch {
       /* fall through to delimited parsing */
     }
@@ -157,8 +264,7 @@ async function pdfToText(file) {
 export async function parseFile(file) {
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   if (ext === "json") {
-    const j = JSON.parse(await file.text());
-    return objectsToRows(Array.isArray(j) ? j : [j]);
+    return jsonToRows(JSON.parse(await file.text()));
   }
   if (ext === "xlsx" || ext === "xls") {
     const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
@@ -166,14 +272,10 @@ export async function parseFile(file) {
     const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, raw: true });
     return matrixToRows(matrix);
   }
-  if (ext === "csv" || ext === "tsv") {
-    const wb = XLSX.read(await file.text(), { type: "string" });
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    return matrixToRows(XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, raw: true }));
-  }
   if (ext === "pdf") {
     return matrixToRows(parseTextToMatrix(await pdfToText(file)));
   }
-  // txt / unknown → treat as delimited/columnar text
+  // csv / tsv / txt / unknown → our own tolerant delimited/columnar parser, which
+  // also recognises JSON pasted into a .txt file.
   return parseRawText(await file.text());
 }
