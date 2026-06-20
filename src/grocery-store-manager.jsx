@@ -17,7 +17,11 @@ import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 const INR = (n) =>
   "₹" + Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 });
 // Round money to 2 decimals so bill totals don't drift (e.g. 0.1 + 0.2 = 0.30000004).
-const money = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+// A non-numeric input collapses to 0 rather than poisoning a total with NaN.
+const money = (n) => {
+  const v = Number(n);
+  return Number.isFinite(v) ? Math.round((v + Number.EPSILON) * 100) / 100 : 0;
+};
 // Local calendar date as YYYY-MM-DD. MUST be local, not toISOString() (which is UTC)
 // — otherwise early-morning sales in IST get filed under the previous day.
 const dateStr = (d) =>
@@ -25,7 +29,7 @@ const dateStr = (d) =>
 const todayStr = () => dateStr(new Date());
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const escapeHtml = (s) =>
-  String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // Brand + payment assets (served from /public). BASE_URL is "/" in dev and the repo
 // sub-path on GitHub Pages, so these resolve correctly in both. assetUrl() makes them
@@ -411,7 +415,11 @@ function removeStock(item, qty, date) {
     if (b.qty <= need) { need -= b.qty; } // consume whole batch
     else { out.push({ ...b, qty: b.qty - need }); need = 0; }
   });
-  return { ...item, batches: out, stock: Math.max(0, (item.stock || 0) - (+qty || 0)), updatedAt: date || todayStr() };
+  // Keep `stock` in lock-step with what actually remains in batches, so the cached sum
+  // can't drift from the batches (e.g. on legacy/imported data where they disagreed).
+  const batchSum = out.reduce((a, b) => a + (+b.qty || 0), 0);
+  const stock = out.length ? batchSum : Math.max(0, (item.stock || 0) - (+qty || 0));
+  return { ...item, batches: out, stock, updatedAt: date || todayStr() };
 }
 
 // Days until the earliest batch expiry (null if no dated batches; negative = expired).
@@ -612,9 +620,11 @@ function StoreManager({ user, onLogout }) {
     };
   }, [items, sales, expenses, logs, loaded]);
 
+  const toastTimer = useRef(null);
   const notify = (msg) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current); // don't let an old timer cut a new toast short
     setToast(msg);
-    setTimeout(() => setToast(null), 2200);
+    toastTimer.current = setTimeout(() => { setToast(null); toastTimer.current = null; }, 2200);
   };
   notifyRef.current = notify; // let the cloud listener surface errors via the same toast
 
@@ -923,13 +933,24 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
 
   const completeSale = () => {
     if (cart.length === 0) return;
+    // Re-check against the latest stock: another device (or a just-synced change) may have
+    // reduced it since these lines were added to the cart. Block rather than oversell.
+    const short = cart
+      .map((c) => ({ c, stock: items.find((i) => i.id === c.id)?.stock ?? 0 }))
+      .filter(({ c, stock }) => c.qty > stock);
+    if (short.length) {
+      const { c, stock } = short[0];
+      return notify(`Only ${stock} ${c.unit} of ${c.name} left — adjust the bill.`);
+    }
     const now = new Date();
     const backDated = saleDate !== todayStr();
     const sale = {
       id: uid(),
       date: saleDate,
       time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + (backDated ? " (back-dated)" : ""),
-      lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, amount: money(c.sellPrice * c.qty) })),
+      // Snapshot buyPrice onto each line so historical profit stays anchored to the cost at
+      // sale time, even if the item's cost is changed (or the item deleted) later.
+      lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, buyPrice: c.buyPrice, amount: money(c.sellPrice * c.qty) })),
       total, profit,
       payment: pay,
       ...(pay === "Udhari" && customer.trim() ? { customer: customer.trim() } : {}),
@@ -1387,7 +1408,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
     const it = items.find((i) => i.id === id);
     if (!it) return;
     setName(it.name);
-    if (it.sellPrice) setMrp(it.sellPrice);
+    setMrp(it.mrp || it.sellPrice || "");
     setSell(it.sellPrice || "");
     setCode(it.code ? it.code : genCode(format));
   };
@@ -1583,11 +1604,12 @@ function RawData({ items, setItems, setSales, notify, log }) {
   const reset = () => { setRows(null); setRaw(""); setSource(""); setErr(null); };
 
   // Collapse duplicate rows (same name) into one entry so quantities sum instead
-  // of one row clobbering another. Returns a Map keyed by lowercased name.
+  // of one row clobbering another. Keyed by normName so it matches existing items the
+  // same way the rest of the app does (trim + lowercase + collapse inner spaces).
   const aggregateRows = () => {
     const agg = new Map();
     rows.forEach((r) => {
-      const key = r.name.trim().toLowerCase();
+      const key = normName(r.name);
       if (!key) return;
       const buy = +r.buyPrice || 0, sell = +r.sellPrice || 0, qty = +r.qty || 0;
       // Fall back to qty × unit price when no explicit line amount was given.
@@ -1606,7 +1628,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
 
   const commitInventory = () => {
     const counts = aggregateRows();
-    const names = new Set(items.map((i) => i.name.toLowerCase()));
+    const names = new Set(items.map((i) => normName(i.name)));
     let added = 0, updated = 0;
     counts.forEach((_, key) => (names.has(key) ? updated++ : added++));
     // Functional updater (rebuilds the aggregate per call so it stays correct even if a live
@@ -1614,9 +1636,9 @@ function RawData({ items, setItems, setSales, notify, log }) {
     setItems((list) => {
       const agg = aggregateRows();
       const next = list.map((i) => {
-        const a = agg.get(i.name.toLowerCase());
+        const a = agg.get(normName(i.name));
         if (!a) return i;
-        agg.delete(i.name.toLowerCase());
+        agg.delete(normName(i.name));
         return { ...addBatch(i, a.qty, "", todayStr()), buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
       });
       agg.forEach((a) => {
@@ -1639,9 +1661,9 @@ function RawData({ items, setItems, setSales, notify, log }) {
     let profit = 0, total = 0;
     const lines = [...agg.values()].map((a) => {
       total += a.amount;
-      const ex = items.find((i) => i.name.toLowerCase() === a.name.toLowerCase());
+      const ex = items.find((i) => normName(i.name) === normName(a.name));
       if (ex) profit += a.amount - ex.buyPrice * a.qty;
-      return { name: a.name, qty: a.qty, unit: ex?.unit || "pc", price: a.qty ? money(a.amount / a.qty) : a.amount, amount: money(a.amount) };
+      return { name: a.name, qty: a.qty, unit: ex?.unit || "pc", buyPrice: ex?.buyPrice ?? 0, price: a.qty ? money(a.amount / a.qty) : a.amount, amount: money(a.amount) };
     });
     total = money(total); profit = money(profit);
     const now = new Date();
@@ -1651,7 +1673,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
       lines, total, profit,
     }]);
     setItems((its) => its.map((i) => {
-      const a = agg.get(i.name.toLowerCase());
+      const a = agg.get(normName(i.name));
       return a ? removeStock(i, a.qty, todayStr()) : i;
     }));
     log("import", `Imported sale ${INR(total)} · ${lines.length} line(s) (${source || "manual"})`);
@@ -1814,8 +1836,10 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     const newLines = editing.lines.filter((l) => l.qty > 0).map((l) => ({ ...l, amount: money(l.price * l.qty) }));
     if (newLines.length === 0) return notify("A bill needs at least one line — use Delete instead");
     const total = money(newLines.reduce((a, l) => a + l.amount, 0));
-    const buyOf = (name) => items.find((i) => i.name.toLowerCase() === name.toLowerCase())?.buyPrice || 0;
-    const profit = money(newLines.reduce((a, l) => a + (l.price - buyOf(l.name)) * l.qty, 0));
+    // Prefer the cost snapshotted on the line at sale time; fall back to the current item
+    // cost only for legacy bills saved before lines carried buyPrice.
+    const buyOf = (l) => (l.buyPrice != null ? +l.buyPrice : (items.find((i) => i.name.toLowerCase() === l.name.toLowerCase())?.buyPrice || 0));
+    const profit = money(newLines.reduce((a, l) => a + (l.price - buyOf(l)) * l.qty, 0));
     const oldQ = {}, newQ = {};
     editing.orig.forEach((l) => { const k = l.name.toLowerCase(); oldQ[k] = (oldQ[k] || 0) + l.qty; });
     newLines.forEach((l) => { const k = l.name.toLowerCase(); newQ[k] = (newQ[k] || 0) + l.qty; });

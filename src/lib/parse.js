@@ -127,9 +127,12 @@ function coreMap(headerCells, dataRows, hasHeader) {
     const name = String((idx.name >= 0 ? row[idx.name] : row[0]) ?? "").trim();
     if (!name) continue;
     const rawUnit = idx.unit >= 0 ? String(row[idx.unit] ?? "").trim() : "";
+    // A blank qty cell defaults to 1, but an explicit "0" is respected (e.g. importing a
+    // catalogue at zero stock) rather than being bumped to 1.
+    const qtyCell = idx.qty >= 0 ? String(row[idx.qty] ?? "").trim() : "";
     out.push({
       name,
-      qty: idx.qty >= 0 ? toNum(row[idx.qty]) || 1 : 1,
+      qty: idx.qty < 0 || qtyCell === "" ? 1 : toNum(row[idx.qty]),
       unit: canonUnit(rawUnit) || "pc",
       buyPrice: idx.buyPrice >= 0 ? toNum(row[idx.buyPrice]) : "",
       sellPrice: idx.sellPrice >= 0 ? toNum(row[idx.sellPrice]) : "",
@@ -222,10 +225,24 @@ export function parseTextToMatrix(text) {
   return lines.map(splitColumnarLine);
 }
 
+// Heuristic: text extracted from a binary file (e.g. a .docx/.png renamed or force-picked)
+// is full of NUL / control bytes. Reject it clearly instead of emitting garbage rows.
+function looksBinary(text) {
+  const sample = text.slice(0, 2000);
+  if (!sample) return false;
+  let bad = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c === 0 || (c < 9) || (c > 13 && c < 32)) bad++;
+  }
+  return bad / sample.length > 0.05;
+}
+
 // Parse pasted text (JSON or delimited/columnar).
 export function parseRawText(text) {
   const t = (text || "").trim();
   if (!t) return [];
+  if (looksBinary(text)) throw new Error("binary or unreadable file");
   if (t[0] === "[" || t[0] === "{") {
     try {
       return jsonToRows(JSON.parse(t));
