@@ -415,11 +415,10 @@ function removeStock(item, qty, date) {
     if (b.qty <= need) { need -= b.qty; } // consume whole batch
     else { out.push({ ...b, qty: b.qty - need }); need = 0; }
   });
-  // Keep `stock` in lock-step with what actually remains in batches, so the cached sum
-  // can't drift from the batches (e.g. on legacy/imported data where they disagreed).
-  const batchSum = out.reduce((a, b) => a + (+b.qty || 0), 0);
-  const stock = out.length ? batchSum : Math.max(0, (item.stock || 0) - (+qty || 0));
-  return { ...item, batches: out, stock, updatedAt: date || todayStr() };
+  // `stock` is the authoritative count; batches track only the dated portion (addBatch can
+  // raise stock without a matching batch), so decrement stock directly rather than from the
+  // batch sum — otherwise legacy stock that predates any batch would be lost on a sale.
+  return { ...item, batches: out, stock: Math.max(0, (item.stock || 0) - (+qty || 0)), updatedAt: date || todayStr() };
 }
 
 // Days until the earliest batch expiry (null if no dated batches; negative = expired).
