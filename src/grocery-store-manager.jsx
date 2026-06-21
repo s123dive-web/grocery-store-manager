@@ -1120,6 +1120,7 @@ function Inventory({ items, setItems, notify, log }) {
   const [restock, setRestock] = useState(null); // {id, name, qty, expiry}
   const [open, setOpen] = useState(null); // expanded item id (batch detail)
   const [rowEdit, setRowEdit] = useState(null); // inline row edit draft {id, …editable fields}
+  const [batchEdit, setBatchEdit] = useState(null); // inline batch editor {id, untracked, rows:[{id,qty,expiry,addedOn}]}
   const [sort, setSort] = useState({ key: "name", dir: 1 }); // dir: 1 asc, -1 desc
 
   const filtered = items.filter((i) => {
@@ -1259,6 +1260,32 @@ function Inventory({ items, setItems, notify, log }) {
     notify("Item updated");
   };
 
+  // ----- Inline batch editing (the expanded detail): edit every batch's qty / expiry / date -----
+  // The editor is the full definition of the item's stock: stock = Σ batch qty on save. Any
+  // undated remainder (older stock that predates batches) is pre-loaded as an editable row so
+  // nothing is lost and there's no double-counting.
+  const startBatchEdit = (i) => {
+    const rows = [...(i.batches || [])].sort(batchSort).map((b) => ({ id: b.id, qty: String(b.qty ?? ""), expiry: b.expiry || "", addedOn: b.addedOn || todayStr() }));
+    const undated = (i.stock || 0) - (i.batches || []).reduce((a, b) => a + (+b.qty || 0), 0);
+    if (undated > 0) rows.push({ id: uid(), qty: String(undated), expiry: "", addedOn: i.createdAt || todayStr() });
+    setBatchEdit({ id: i.id, rows });
+  };
+  const setBatchField = (bid, k, v) => setBatchEdit((be) => ({ ...be, rows: be.rows.map((b) => (b.id === bid ? { ...b, [k]: v } : b)) }));
+  const addBatchRow = () => setBatchEdit((be) => ({ ...be, rows: [...be.rows, { id: uid(), qty: "", expiry: "", addedOn: todayStr() }] }));
+  const removeBatchRow = (bid) => setBatchEdit((be) => ({ ...be, rows: be.rows.filter((b) => b.id !== bid) }));
+  const batchEditSum = batchEdit ? batchEdit.rows.reduce((a, b) => a + (+b.qty || 0), 0) : 0;
+  const saveBatchEdit = () => {
+    const f = batchEdit;
+    const batches = f.rows
+      .map((b) => ({ id: b.id, qty: +b.qty || 0, expiry: b.expiry || "", addedOn: b.addedOn || todayStr() }))
+      .filter((b) => b.qty > 0); // drop blank / zero-qty rows
+    const stock = batches.reduce((a, b) => a + b.qty, 0);
+    setItems((list) => list.map((i) => (i.id === f.id ? { ...i, batches, stock, updatedAt: todayStr() } : i)));
+    log("inventory", `Edited batches · stock now ${stock}`);
+    setBatchEdit(null);
+    notify("Batches updated");
+  };
+
   const stop = (e) => e.stopPropagation();
 
   return (
@@ -1353,25 +1380,55 @@ function Inventory({ items, setItems, notify, log }) {
                   {isOpen && (
                     <tr>
                       <td colSpan={8} style={{ background: "#F7FAF7" }}>
-                        {i.batches && i.batches.length ? (
-                          <table className="tbl" style={{ margin: 0 }}>
-                            <thead><tr><th style={{ width: 120 }}>Batch qty</th><th style={{ width: 160 }}>Expiry</th><th>Date added</th></tr></thead>
-                            <tbody>
-                              {[...i.batches].sort(batchSort).map((b) => {
-                                const bd = b.expiry ? Math.round((new Date(b.expiry + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000) : null;
-                                const col = bd == null ? "#677" : bd < 0 ? "#C44536" : bd <= 30 ? "#B0762A" : "#677";
-                                return (
+                        {batchEdit?.id === i.id ? (
+                          <div onClick={stop}>
+                            <table className="tbl" style={{ margin: 0 }}>
+                              <thead><tr><th style={{ width: 110 }}>Batch qty</th><th style={{ width: 170 }}>Expiry</th><th style={{ width: 170 }}>Date added</th><th style={{ width: 30 }}></th></tr></thead>
+                              <tbody>
+                                {batchEdit.rows.map((b) => (
                                   <tr key={b.id}>
-                                    <td style={{ fontWeight: 700 }}>{b.qty} {i.unit}</td>
-                                    <td style={{ color: col, fontWeight: bd != null && bd <= 30 ? 700 : 400 }}>{b.expiry || "— no expiry —"}{bd != null && bd <= 30 ? (bd < 0 ? " (expired)" : ` (${bd}d left)`) : ""}</td>
-                                    <td style={{ color: "#677" }}>{b.addedOn}</td>
+                                    <td><input className="input" style={{ padding: "6px 8px", width: 80 }} type="number" min="0" value={b.qty} onChange={(e) => setBatchField(b.id, "qty", e.target.value)} aria-label="Batch quantity" /></td>
+                                    <td><input className="input" style={{ padding: "6px 8px" }} type="date" value={b.expiry} onChange={(e) => setBatchField(b.id, "expiry", e.target.value)} aria-label="Batch expiry" /></td>
+                                    <td><input className="input" style={{ padding: "6px 8px" }} type="date" max={todayStr()} value={b.addedOn} onChange={(e) => setBatchField(b.id, "addedOn", e.target.value)} aria-label="Date added" /></td>
+                                    <td><button className="btn small danger" aria-label="Remove batch" onClick={() => removeBatchRow(b.id)}>✕</button></td>
                                   </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
+                                ))}
+                                {batchEdit.rows.length === 0 && <tr><td colSpan={4}><Empty text="No batches — add one below." /></td></tr>}
+                              </tbody>
+                            </table>
+                            <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+                              <button className="btn small ghost" onClick={addBatchRow}>+ Add batch</button>
+                              <button className="btn small primary" onClick={saveBatchEdit}>✓ Save batches</button>
+                              <button className="btn small ghost" onClick={() => setBatchEdit(null)}>Cancel</button>
+                              <span style={{ fontSize: 11.5, color: "#8A9C90", marginLeft: "auto" }}>New stock total: <b>{batchEditSum} {i.unit}</b></span>
+                            </div>
+                          </div>
                         ) : (
-                          <div style={{ padding: "8px 4px", color: "#8A9", fontSize: 13 }}>No batch / expiry detail yet — add stock via <b>Restock</b> to record expiry dates.</div>
+                          <>
+                            {i.batches && i.batches.length ? (
+                              <table className="tbl" style={{ margin: 0 }}>
+                                <thead><tr><th style={{ width: 120 }}>Batch qty</th><th style={{ width: 160 }}>Expiry</th><th>Date added</th></tr></thead>
+                                <tbody>
+                                  {[...i.batches].sort(batchSort).map((b) => {
+                                    const bd = b.expiry ? Math.round((new Date(b.expiry + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000) : null;
+                                    const col = bd == null ? "#677" : bd < 0 ? "#C44536" : bd <= 30 ? "#B0762A" : "#677";
+                                    return (
+                                      <tr key={b.id}>
+                                        <td style={{ fontWeight: 700 }}>{b.qty} {i.unit}</td>
+                                        <td style={{ color: col, fontWeight: bd != null && bd <= 30 ? 700 : 400 }}>{b.expiry || "— no expiry —"}{bd != null && bd <= 30 ? (bd < 0 ? " (expired)" : ` (${bd}d left)`) : ""}</td>
+                                        <td style={{ color: "#677" }}>{b.addedOn}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            ) : (
+                              <div style={{ padding: "8px 4px", color: "#8A9", fontSize: 13 }}>No batch / expiry detail yet.</div>
+                            )}
+                            <div style={{ marginTop: 8 }} onClick={stop}>
+                              <button className="btn small ghost" onClick={() => startBatchEdit(i)}>✎ Edit batches</button>
+                            </div>
+                          </>
                         )}
                       </td>
                     </tr>
