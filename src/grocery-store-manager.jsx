@@ -709,6 +709,7 @@ function StoreManager({ user, onLogout }) {
           ["alerts", "⚠", "Alerts"],
           ["sales", "⊟", "Sales History"],
           ["finance", "∑", "Finance"],
+          ["stats", "📊", "Stats"],
           ["expense", "⊝", "Add Expense"],
           ["raw", "⇪", "Data Import"],
           ["barcode", "▥", "Barcode Creator"],
@@ -770,6 +771,8 @@ function StoreManager({ user, onLogout }) {
           <SalesHistory sales={sales} items={items} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
         ) : tab === "finance" ? (
           <Finance sales={sales} expenses={expenses} />
+        ) : tab === "stats" ? (
+          <Stats sales={sales} expenses={expenses} items={items} />
         ) : tab === "expense" ? (
           <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "logs" ? (
@@ -2729,6 +2732,274 @@ function Finance({ sales, expenses }) {
             </BarChart>
           )}
         </ChartCard>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Stats (insights / analytics) ----------
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0]; // show Mon → Sun
+const sectionHead = { fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em", margin: "22px 0 8px" };
+// Pull the clock hour (0–23) out of a stored sale time like "02:15 pm (back-dated)".
+const parseHour = (t) => {
+  const m = String(t || "").match(/^(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (!m) return null;
+  let h = (+m[1]) % 12;
+  if (/pm/i.test(m[3])) h += 12;
+  return h;
+};
+const hourLabel = (h) => { const hh = h % 12 || 12; return hh + (h < 12 ? "a" : "p"); };
+
+function Stats({ sales, expenses, items }) {
+  const [preset, setPreset] = useState("thisMonth");
+  const [cfrom, setCfrom] = useState("");
+  const [cto, setCto] = useState("");
+  const [metric, setMetric] = useState("revenue"); // top-products sort: revenue | qty | profit
+  const { from, to, label } = periodRange(preset, cfrom, cto);
+
+  const pSales = useMemo(() => sales.filter((s) => s.date >= from && s.date <= to), [sales, from, to]);
+  const pExp = useMemo(() => expenses.filter((e) => e.date >= from && e.date <= to), [expenses, from, to]);
+  const revenue = money(pSales.reduce((a, s) => a + s.total, 0));
+  const profit = money(pSales.reduce((a, s) => a + s.profit, 0));
+  const expTotal = money(pExp.reduce((a, e) => a + e.amount, 0));
+  const margin = revenue > 0 ? Math.round((profit / revenue) * 100) : 0;
+
+  // Per-date totals → weekday averages and best/worst days.
+  const { weekdayData, bestDow, avgDayRev, topDates, worstDates } = useMemo(() => {
+    const dayTotals = {};
+    pSales.forEach((s) => { const d = dayTotals[s.date] || (dayTotals[s.date] = { rev: 0, profit: 0 }); d.rev += s.total; d.profit += s.profit; });
+    const dow = Array.from({ length: 7 }, () => ({ rev: 0, profit: 0, days: 0 }));
+    Object.entries(dayTotals).forEach(([date, t]) => { const k = new Date(date + "T00:00").getDay(); dow[k].rev += t.rev; dow[k].profit += t.profit; dow[k].days += 1; });
+    const weekdayData = DOW_ORDER.map((k) => ({ name: DOW[k], revenue: money(dow[k].days ? dow[k].rev / dow[k].days : 0), profit: money(dow[k].days ? dow[k].profit / dow[k].days : 0) }));
+    const bestDow = [...weekdayData].sort((a, b) => b.revenue - a.revenue)[0];
+    const active = weekdayData.filter((w) => w.revenue > 0);
+    const avgDayRev = active.length ? money(active.reduce((a, w) => a + w.revenue, 0) / active.length) : 0;
+    const datesSorted = Object.entries(dayTotals).map(([date, t]) => ({ date, rev: money(t.rev), profit: money(t.profit) })).sort((a, b) => b.rev - a.rev);
+    return { weekdayData, bestDow, avgDayRev, topDates: datesSorted.slice(0, 5), worstDates: datesSorted.slice(-5).reverse() };
+  }, [pSales]);
+
+  // Revenue by time of day (live clock on the bill; rows without a parseable time are skipped).
+  const { hourData, busiestHour } = useMemo(() => {
+    const agg = Array.from({ length: 24 }, () => 0);
+    pSales.forEach((s) => { const h = parseHour(s.time); if (h != null) agg[h] += s.total; });
+    const activeH = agg.map((rev, h) => ({ h, rev })).filter((x) => x.rev > 0);
+    let hourData = [];
+    if (activeH.length) {
+      const min = Math.min(...activeH.map((x) => x.h)), max = Math.max(...activeH.map((x) => x.h));
+      for (let h = min; h <= max; h++) hourData.push({ label: hourLabel(h), revenue: money(agg[h]) });
+    }
+    const busiestHour = activeH.length ? activeH.reduce((a, b) => (b.rev > a.rev ? b : a)) : null;
+    return { hourData, busiestHour };
+  }, [pSales]);
+
+  // Revenue by part of month (early / mid / late).
+  const monthPart = useMemo(() => {
+    const t = [{ name: "1–10", revenue: 0 }, { name: "11–20", revenue: 0 }, { name: "21–end", revenue: 0 }];
+    pSales.forEach((s) => { const d = +s.date.slice(8, 10); t[d <= 10 ? 0 : d <= 20 ? 1 : 2].revenue += s.total; });
+    return t.map((x) => ({ ...x, revenue: money(x.revenue) }));
+  }, [pSales]);
+
+  // Per-product aggregation (revenue / qty / profit) for top sellers.
+  const products = useMemo(() => {
+    const m = {};
+    pSales.forEach((s) => (s.lines || []).forEach((l) => {
+      const p = m[l.name] || (m[l.name] = { name: l.name, revenue: 0, qty: 0, profit: 0 });
+      p.revenue += l.amount; p.qty += l.qty; p.profit += (l.price - (l.buyPrice || 0)) * l.qty;
+    }));
+    return Object.values(m).map((p) => ({ ...p, revenue: money(p.revenue), profit: money(p.profit), qty: Math.round(p.qty * 1000) / 1000 }));
+  }, [pSales]);
+  const topProducts = useMemo(() => [...products].sort((a, b) => b[metric] - a[metric]).slice(0, 10), [products, metric]);
+
+  // Revenue by category (best-effort: match each sold line's name to its inventory category).
+  const categoryData = useMemo(() => {
+    const catOf = {};
+    items.forEach((i) => { catOf[normName(i.name)] = i.category || "Other"; });
+    const m = {};
+    pSales.forEach((s) => (s.lines || []).forEach((l) => {
+      const c = l.misc ? "Misc / custom" : (catOf[normName(l.name)] || "Uncategorized");
+      const a = m[c] || (m[c] = { name: c, revenue: 0, profit: 0 });
+      a.revenue += l.amount; a.profit += (l.price - (l.buyPrice || 0)) * l.qty;
+    }));
+    return Object.values(m).map((c) => ({ ...c, revenue: money(c.revenue), profit: money(c.profit) })).sort((a, b) => b.revenue - a.revenue).slice(0, 8);
+  }, [pSales, items]);
+
+  // Slow / dead stock: in-stock items with no sales in this period (highest stock value first).
+  const deadStock = useMemo(() => {
+    const sold = new Set();
+    pSales.forEach((s) => (s.lines || []).forEach((l) => sold.add(normName(l.name))));
+    return items.filter((i) => (i.stock || 0) > 0 && !sold.has(normName(i.name)))
+      .map((i) => ({ id: i.id, name: i.name, stock: i.stock, unit: i.unit, value: money((i.buyPrice || 0) * i.stock) }))
+      .sort((a, b) => b.value - a.value);
+  }, [pSales, items]);
+
+  // Inventory health (current snapshot, independent of the period).
+  const inv = useMemo(() => {
+    const stockCost = money(items.reduce((a, i) => a + (i.buyPrice || 0) * (i.stock || 0), 0));
+    const stockSell = money(items.reduce((a, i) => a + (i.sellPrice || 0) * (i.stock || 0), 0));
+    const lowCount = items.filter((i) => (i.stock || 0) <= (i.lowAt || 0)).length;
+    let soonQty = 0, soonVal = 0, expQty = 0, expVal = 0;
+    items.forEach((i) => (i.batches || []).forEach((b) => {
+      if (!b.expiry) return;
+      const d = Math.round((new Date(b.expiry + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000);
+      const val = (i.sellPrice || 0) * (b.qty || 0);
+      if (d < 0) { expQty += b.qty; expVal += val; } else if (d <= 30) { soonQty += b.qty; soonVal += val; }
+    }));
+    const unitsSold = pSales.reduce((a, s) => a + (s.lines || []).reduce((x, l) => x + (l.misc ? 0 : l.qty), 0), 0);
+    const totalStock = items.reduce((a, i) => a + (i.stock || 0), 0);
+    return { stockCost, stockSell, lowCount, soonQty, soonVal: money(soonVal), expQty, expVal: money(expVal), turnover: totalStock ? Math.round((unitsSold / totalStock) * 100) / 100 : 0, unitsSold: Math.round(unitsSold * 100) / 100, totalStock: Math.round(totalStock * 100) / 100 };
+  }, [items, pSales]);
+
+  const fmtDate = (d) => new Date(d + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
+  const metricLabel = { revenue: "By revenue", qty: "By quantity", profit: "By profit" };
+
+  return (
+    <div>
+      <Header title="Stats" sub={label}>
+        <select className="input" style={{ width: "auto" }} value={preset} onChange={(e) => setPreset(e.target.value)}>
+          {PERIODS.map(([k, lbl]) => <option key={k} value={k}>{lbl}</option>)}
+        </select>
+      </Header>
+
+      {preset === "custom" && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+          <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={cfrom} max={cto || todayStr()} onChange={(e) => setCfrom(e.target.value)} /></label>
+          <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={cto} max={todayStr()} onChange={(e) => setCto(e.target.value)} /></label>
+        </div>
+      )}
+
+      <div style={S.cards}>
+        <Card label="Revenue" value={INR(revenue)} sub={pSales.length + " bills"} />
+        <Card label="Net margin" value={margin + "%"} sub={`profit ${INR(profit)} · exp ${INR(expTotal)}`} accent />
+        <Card label="Best weekday" value={bestDow && bestDow.revenue > 0 ? bestDow.name : "—"} sub={bestDow && bestDow.revenue > 0 ? `avg ${INR(bestDow.revenue)}/day` : "no sales yet"} />
+        <Card label="Busiest hour" value={busiestHour ? hourLabel(busiestHour.h).replace("a", " AM").replace("p", " PM") : "—"} sub={busiestHour ? `${INR(money(busiestHour.rev))} taken` : "—"} />
+      </div>
+
+      {pSales.length === 0 ? (
+        <section style={{ ...S.panel, marginTop: 16 }}><Empty text="No sales in this period — pick a wider range to see insights." /></section>
+      ) : (
+        <>
+          <div style={sectionHead}>Day &amp; time patterns</div>
+          {bestDow && bestDow.revenue > 0 && avgDayRev > 0 && (
+            <div style={{ fontSize: 12.5, color: "#3A5547", marginBottom: 8 }}>
+              💡 <b>{bestDow.name}</b> is usually your strongest day — about <b>{INR(bestDow.revenue)}</b> on average, {Math.round(((bestDow.revenue - avgDayRev) / avgDayRev) * 100)}% above a typical day.
+            </div>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
+            <ChartCard title="Average revenue & profit by weekday">
+              <BarChart data={weekdayData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#678" }} />
+                <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+                <Tooltip formatter={(v) => INR(v)} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="revenue" name="Avg revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="profit" name="Avg profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ChartCard>
+            <section style={S.panel}>
+              <div style={S.panelHead}>Best &amp; slowest days</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#1B5E43", margin: "2px 0 4px" }}>Top days</div>
+              {topDates.map((d) => (
+                <div key={d.date} style={S.row}><span>{fmtDate(d.date)}</span><b>{INR(d.rev)}</b></div>
+              ))}
+              {worstDates.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#C44536", margin: "10px 0 4px" }}>Slowest days</div>
+                  {worstDates.map((d) => (
+                    <div key={d.date} style={S.row}><span>{fmtDate(d.date)}</span><b>{INR(d.rev)}</b></div>
+                  ))}
+                </>
+              )}
+            </section>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+            <ChartCard title="Revenue by time of day">
+              {hourData.length === 0 ? (
+                <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No clock-timed bills in this period." /></div>
+              ) : (
+                <BarChart data={hourData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={12} />
+                  <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+                  <Tooltip formatter={(v) => INR(v)} />
+                  <Bar dataKey="revenue" name="Revenue" fill="#2A6FB0" radius={[3, 3, 0, 0]} />
+                </BarChart>
+              )}
+            </ChartCard>
+            <ChartCard title="Revenue by part of month">
+              <BarChart data={monthPart} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#678" }} />
+                <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+                <Tooltip formatter={(v) => INR(v)} />
+                <Bar dataKey="revenue" name="Revenue" fill="#7A5AB0" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ChartCard>
+          </div>
+
+          <div style={sectionHead}>Product &amp; category</div>
+          <section style={S.panel}>
+            <div style={S.panelHead}>
+              Top sellers
+              <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                {["revenue", "qty", "profit"].map((m) => (
+                  <button key={m} className={"btn small " + (metric === m ? "primary" : "ghost")} onClick={() => setMetric(m)}>{metricLabel[m]}</button>
+                ))}
+              </div>
+            </div>
+            <table className="tbl">
+              <thead><tr><th>Item</th><th style={{ textAlign: "right" }}>Qty</th><th style={{ textAlign: "right" }}>Revenue</th><th style={{ textAlign: "right" }}>Profit</th></tr></thead>
+              <tbody>
+                {topProducts.map((p) => (
+                  <tr key={p.name}>
+                    <td>{p.name}</td>
+                    <td style={{ textAlign: "right", fontWeight: metric === "qty" ? 800 : 400 }}>{p.qty}</td>
+                    <td style={{ textAlign: "right", fontWeight: metric === "revenue" ? 800 : 400 }}>{INR(p.revenue)}</td>
+                    <td style={{ textAlign: "right", color: "#1B5E43", fontWeight: metric === "profit" ? 800 : 400 }}>{INR(p.profit)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+            <ChartCard title="Revenue by category">
+              {categoryData.length === 0 ? (
+                <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No category data." /></div>
+              ) : (
+                <BarChart data={categoryData} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10.5, fill: "#465" }} width={110} />
+                  <Tooltip formatter={(v) => INR(v)} />
+                  <Bar dataKey="revenue" name="Revenue" fill="#3DA17A" radius={[0, 3, 3, 0]} />
+                </BarChart>
+              )}
+            </ChartCard>
+            <section style={S.panel}>
+              <div style={S.panelHead}>Slow movers — in stock, no sales this period <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0, color: "#8A9C90", marginLeft: 8 }}>{deadStock.length}</span></div>
+              {deadStock.length === 0 ? (
+                <Empty text="Everything in stock sold at least once. 👍" />
+              ) : (
+                deadStock.slice(0, 10).map((i) => (
+                  <div key={i.id} style={S.row}><span>{i.name} <span style={{ color: "#9AA", fontSize: 11 }}>· {i.stock} {i.unit}</span></span><b>{INR(i.value)}</b></div>
+                ))
+              )}
+              {deadStock.length > 10 && <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 6 }}>+ {deadStock.length - 10} more…</div>}
+            </section>
+          </div>
+        </>
+      )}
+
+      <div style={sectionHead}>Inventory health <span style={{ fontWeight: 500, color: "#8A9C90" }}>(current)</span></div>
+      <div style={S.cards}>
+        <Card label="Stock value (cost)" value={INR(inv.stockCost)} sub={items.length + " items"} />
+        <Card label="Stock value (sell)" value={INR(inv.stockSell)} sub="potential revenue" />
+        <Card label="Low stock" value={inv.lowCount} sub="at or below alert level" />
+        <Card label="Expiry risk" value={INR(inv.soonVal)} sub={`${inv.soonQty} unit(s) ≤30d` + (inv.expVal > 0 ? ` · ${INR(inv.expVal)} expired` : "")} />
+      </div>
+      <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>
+        Stock turnover this period: <b>{inv.turnover}×</b> ({inv.unitsSold} unit(s) sold vs {inv.totalStock} in stock now). Higher means stock moves faster.
       </div>
     </div>
   );
