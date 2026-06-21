@@ -1951,16 +1951,29 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   });
   const setPartDate = (idx, date) => setSplitting((sp) => ({ ...sp, parts: sp.parts.map((p, i) => (i === idx ? { ...p, date } : p)) }));
   const setPartAmount = (idx, amount) => setSplitting((sp) => ({ ...sp, parts: sp.parts.map((p, i) => (i === idx ? { ...p, amount } : p)) }));
+  // Put whatever is left over (total − all earlier parts) onto the last part, so the
+  // amounts add up to the original in one click after editing the others.
+  const balanceSplit = () => setSplitting((sp) => {
+    const exceptLast = money(sp.parts.slice(0, -1).reduce((a, p) => a + (+p.amount || 0), 0));
+    return { ...sp, parts: sp.parts.map((p, i) => (i === sp.parts.length - 1 ? { ...p, amount: money(sp.total - exceptLast) } : p)) };
+  });
 
   const splitSum = splitting ? money(splitting.parts.reduce((a, p) => a + (+p.amount || 0), 0)) : 0;
+  const splitDiff = splitting ? money(splitting.total - splitSum) : 0;
+  // Valid when every part has a date and a positive amount, and the amounts add up to the
+  // original to the paisa. A sub-paisa float residual is tolerated and snapped exactly on save.
   const splitValid = !!splitting
     && splitting.parts.length >= 2
     && splitting.parts.every((p) => p.date && (+p.amount || 0) > 0)
-    && splitSum === splitting.total;
+    && Math.abs(splitDiff) < 0.005;
 
   const saveSplit = () => {
     if (!splitValid) return;
-    const { id, time, payment, customer, total, profit, lines, parts } = splitting;
+    const { id, time, payment, customer, total, profit, lines } = splitting;
+    // Snap the last part to absorb any sub-paisa residual so the parts sum to EXACTLY total.
+    const exceptLast = money(splitting.parts.slice(0, -1).reduce((a, p) => a + (+p.amount || 0), 0));
+    const parts = splitting.parts.map((p, i, arr) =>
+      ({ ...p, amount: i === arr.length - 1 ? money(total - exceptLast) : money(+p.amount || 0) }));
     let profAcc = 0;
     const newSales = parts.map((p, idx) => {
       const f = (+p.amount) / total;
@@ -2095,14 +2108,15 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
           <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
             <button className="btn small ghost" onClick={addPart}>+ Add date</button>
             <button className="btn small ghost" onClick={divideEqually}>Divide equally</button>
+            <button className="btn small ghost" onClick={balanceSplit} disabled={Math.abs(splitDiff) < 0.005}>Balance last row</button>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 12 }}>
             <span>Split total</span>
-            <span style={{ color: splitSum === splitting.total ? "#1B5E43" : "#C44536" }}>{INR(splitSum)} / {INR(splitting.total)}</span>
+            <span style={{ color: Math.abs(splitDiff) < 0.005 ? "#1B5E43" : "#C44536" }}>{INR(splitSum)} / {INR(splitting.total)}</span>
           </div>
-          {splitSum !== splitting.total && (
+          {Math.abs(splitDiff) >= 0.005 && (
             <div style={{ fontSize: 12, color: "#C44536", marginTop: 4 }}>
-              Amounts must add up to exactly {INR(splitting.total)} (off by {INR(money(splitting.total - splitSum))}).
+              Amounts must add up to {INR(splitting.total)} — {splitDiff > 0 ? `${INR(splitDiff)} short` : `${INR(-splitDiff)} over`}. Use “Balance last row” to put the rest on the last date.
             </div>
           )}
           <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} disabled={!splitValid} onClick={saveSplit}>
