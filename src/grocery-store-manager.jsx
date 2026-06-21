@@ -2340,6 +2340,9 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
     return extra;
   }, [items]);
 
+  const zeroStockCount = useMemo(() => items.filter((i) => (+i.stock || 0) <= 0).length, [items]);
+  const zeroPriceCount = useMemo(() => items.filter((i) => (+i.sellPrice || 0) <= 0).length, [items]);
+
   const ops = [
     { key: "zeroStock", label: "Zero all stock", group: "Inventory",
       desc: "Set stock to 0 and clear every batch for all items. Names and prices are kept.",
@@ -2366,6 +2369,16 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
         return [...g.values()].map((x) => (x.length === 1 ? x[0] : mergeItemGroup(x)));
       }),
       logMsg: "Merged duplicate items", toast: "Duplicates merged" },
+    { key: "delZeroStock", label: "Delete 0-stock items" + (zeroStockCount ? ` (${zeroStockCount})` : ""), group: "Danger zone", danger: true,
+      desc: "Permanently remove every item whose stock is 0. Items that still have stock are kept.",
+      disabled: zeroStockCount === 0,
+      apply: () => setItems((l) => l.filter((i) => (+i.stock || 0) > 0)),
+      logMsg: "Deleted 0-stock items", toast: "0-stock items deleted" },
+    { key: "delZeroPrice", label: "Delete 0-price items" + (zeroPriceCount ? ` (${zeroPriceCount})` : ""), group: "Danger zone", danger: true,
+      desc: "Permanently remove every item whose sell price is 0. Items with a sell price are kept.",
+      disabled: zeroPriceCount === 0,
+      apply: () => setItems((l) => l.filter((i) => (+i.sellPrice || 0) > 0)),
+      logMsg: "Deleted 0-price items", toast: "0-price items deleted" },
     { key: "delItems", label: "Delete ALL inventory items", group: "Danger zone", danger: true,
       desc: "Permanently remove every item from inventory. Sales history is kept.",
       apply: () => setItems([]), logMsg: "Deleted all inventory items", toast: "All items deleted" },
