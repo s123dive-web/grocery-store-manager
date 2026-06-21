@@ -881,23 +881,38 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
 
-  // Units sold per item name — used to surface best-sellers first.
+  // Units sold per item name — used for the best-seller ★ and as a tie-breaker.
   const soldQty = useMemo(() => {
     const m = {};
     (sales || []).forEach((s) => (s.lines || []).forEach((l) => { m[l.name] = (m[l.name] || 0) + l.qty; }));
     return m;
   }, [sales]);
 
+  // Most recent sale date per item name — used to surface recently-sold items first.
+  const lastSold = useMemo(() => {
+    const m = {};
+    (sales || []).forEach((s) => (s.lines || []).forEach((l) => {
+      if (!m[l.name] || s.date > m[l.name]) m[l.name] = s.date;
+    }));
+    return m;
+  }, [sales]);
+
+  // Only items in stock are sellable, so the picker only ever shows stock > 0.
   const results = useMemo(() => {
     const s = q.trim().toLowerCase();
+    const inStock = items.filter((i) => (i.stock || 0) > 0);
     if (s) {
-      return items
+      return inStock
         .filter((i) => i.name.toLowerCase().includes(s) || (i.code || "").toLowerCase().includes(s))
         .slice(0, 12);
     }
-    // No search: best-sellers (by units sold) first, then the rest.
-    return [...items].sort((a, b) => (soldQty[b.name] || 0) - (soldQty[a.name] || 0)).slice(0, 12);
-  }, [q, items, soldQty]);
+    // No search: most recently sold first, then by units sold, then the rest.
+    return [...inStock].sort((a, b) => {
+      const la = lastSold[a.name] || "", lb = lastSold[b.name] || "";
+      if (la !== lb) return la < lb ? 1 : -1; // newer sale date first
+      return (soldQty[b.name] || 0) - (soldQty[a.name] || 0);
+    }).slice(0, 12);
+  }, [q, items, soldQty, lastSold]);
 
   const add = (item) => {
     if (item.stock <= 0) return notify("Out of stock: " + item.name);
