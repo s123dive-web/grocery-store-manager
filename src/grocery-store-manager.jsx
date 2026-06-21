@@ -2493,6 +2493,24 @@ function Finance({ sales, expenses }) {
         <Card label="Net profit" value={INR(money(grossProfit - expTotal))} sub="gross − expenses" accent />
       </div>
 
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginTop: 16 }}>
+        {[
+          { key: "revenue", title: "Revenue", color: "#1B5E43" },
+          { key: "profit", title: "Profit", color: "#E8A33D" },
+          { key: "expenses", title: "Expenses", color: "#C44536" },
+        ].map((c) => (
+          <ChartCard key={c.key} title={c.title} height={220}>
+            <BarChart data={series} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={20} />
+              <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+              <Tooltip formatter={(v) => INR(v)} />
+              <Bar dataKey={c.key} name={c.title} fill={c.color} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ChartCard>
+        ))}
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16, marginTop: 16 }}>
         <ChartCard title="Revenue & profit over time">
           <AreaChart data={series} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
