@@ -1,7 +1,7 @@
 // Flexible data parser for the "Raw Data Record" tab.
 // Turns an uploaded file (csv / tsv / txt / xls / xlsx / json / pdf) or pasted
 // text into a normalised list of rows the app can map to inventory or sales:
-//   { name, qty, unit, buyPrice, sellPrice, amount }
+//   { name, qty, unit, buyPrice, sellPrice, amount, expiry }
 // The goal is to accept messy, real-world data: with or without headers, any
 // common delimiter, currency symbols, nested JSON backups, etc.
 // Everything runs in the browser. PDF text extraction is best-effort.
@@ -26,6 +26,7 @@ const HEADER_RULES = [
   ["sellPrice", /\b(sell|sale|mrp|price|selling|rate|sp|unit\s*price)\b/i],
   ["qty", /\b(qty|quantity|nos|units?|pcs|count|stock|balance|on\s*hand|onhand)\b/i],
   ["unit", /\b(unit|uom|measure|packing|pack)\b/i],
+  ["expiry", /\b(expiry|expiration|expires?|exp\.?\s*date|exp|best\s*before|bb|use\s*by|valid\s*(?:till|until|upto))\b/i],
   ["name", /\b(name|item|product|description|particular|goods|details?|title|sku)\b/i],
 ];
 
@@ -51,12 +52,47 @@ function numericVal(c) {
   return { ok: false, n: 0 };
 }
 
+// Date-like token (used to spot an expiry in unlabelled/headerless rows).
+const DATE_RE = /^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})$/;
+const pad2 = (n) => String(n).padStart(2, "0");
+const isoFromParts = (y, m, d) => `${y}-${pad2(m)}-${pad2(d)}`;
+
+// Normalise an expiry value (ISO string, d/m/y, JS Date, month-name, or Excel serial)
+// to a local "YYYY-MM-DD"; returns "" when it isn't a recognisable date. Day-first by
+// default (Indian convention), swapping to month-first only when the parts force it.
+function toDateStr(v) {
+  if (v == null || v === "") return "";
+  if (v instanceof Date) return isNaN(v) ? "" : isoFromParts(v.getFullYear(), v.getMonth() + 1, v.getDate());
+  const s = String(v).trim();
+  if (!s) return "";
+  let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/); // YYYY-MM-DD / YYYY/M/D
+  if (m) return isoFromParts(+m[1], +m[2], +m[3]);
+  m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/); // D-M-Y
+  if (m) {
+    const a = +m[1], b = +m[2];
+    const y = m[3].length === 2 ? "20" + m[3] : m[3];
+    if (b > 12 && a <= 12) return isoFromParts(+y, a, b); // a=month, b=day
+    return isoFromParts(+y, b, a); // a=day, b=month
+  }
+  if (/^\d+(\.\d+)?$/.test(s)) { // Excel serial date (days since 1899-12-30)
+    const n = Number(s);
+    if (n > 59 && n < 60000) {
+      const d = new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000);
+      return isoFromParts(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+    }
+    return "";
+  }
+  const t = Date.parse(s); // month-name forms like "Dec 2026" / "31 Dec 2026"
+  if (!isNaN(t)) { const d = new Date(t); return isoFromParts(d.getFullYear(), d.getMonth() + 1, d.getDate()); }
+  return "";
+}
+
 // Normalise a header label so word-boundary rules also catch camelCase and
 // snake/kebab keys: "buyPrice" → "buy Price", "sell_price" → "sell price".
 const normHeader = (cell) => String(cell ?? "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
 
 function mapHeaderIndices(cells) {
-  const idx = { name: -1, qty: -1, unit: -1, buyPrice: -1, sellPrice: -1, amount: -1 };
+  const idx = { name: -1, qty: -1, unit: -1, buyPrice: -1, sellPrice: -1, amount: -1, expiry: -1 };
   cells.forEach((cell, i) => {
     const c = normHeader(cell);
     for (const [field, re] of HEADER_RULES) {
@@ -85,11 +121,12 @@ function looksLikeHeader(cells) {
 function inferRow(cells) {
   const parts = (cells || []).map((c) => String(c ?? "").trim()).filter((c) => c !== "");
   if (!parts.length) return null;
-  let unit = "";
+  let unit = "", expiry = "";
   const textCells = [];
   const nums = [];
   for (const c of parts) {
     if (!unit && isUnitToken(c)) { unit = canonUnit(c); continue; }
+    if (!expiry && DATE_RE.test(c)) { expiry = toDateStr(c); continue; }
     const v = numericVal(c);
     if (v.ok) nums.push(v.n);
     else textCells.push(c);
@@ -107,7 +144,7 @@ function inferRow(cells) {
   } else if (nums.length >= 4) {
     qty = nums[0]; buyPrice = nums[1]; sellPrice = nums[2]; amount = nums[3];
   }
-  return { name, qty: qty || 1, unit: unit || "pc", buyPrice, sellPrice, amount };
+  return { name, qty: qty || 1, unit: unit || "pc", buyPrice, sellPrice, amount, expiry };
 }
 
 // Core: given a header row + data rows, produce normalised rows.
@@ -137,6 +174,7 @@ function coreMap(headerCells, dataRows, hasHeader) {
       buyPrice: idx.buyPrice >= 0 ? toNum(row[idx.buyPrice]) : "",
       sellPrice: idx.sellPrice >= 0 ? toNum(row[idx.sellPrice]) : "",
       amount: idx.amount >= 0 ? toNum(row[idx.amount]) : "",
+      expiry: idx.expiry >= 0 ? toDateStr(row[idx.expiry]) : "",
     });
   }
   return out;
@@ -284,7 +322,7 @@ export async function parseFile(file) {
     return jsonToRows(JSON.parse(await file.text()));
   }
   if (ext === "xlsx" || ext === "xls") {
-    const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, raw: true });
     return matrixToRows(matrix);

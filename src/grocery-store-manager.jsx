@@ -1597,7 +1597,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
     }
   };
 
-  const addRow = () => setRows([...(rows || []), { name: "", qty: 1, unit: "pc", buyPrice: "", sellPrice: "", amount: "" }]);
+  const addRow = () => setRows([...(rows || []), { name: "", qty: 1, unit: "pc", buyPrice: "", sellPrice: "", amount: "", expiry: "" }]);
   const edit = (i, k, v) => setRows(rows.map((r, x) => (x === i ? { ...r, [k]: v } : r)));
   const drop = (i) => setRows(rows.filter((_, x) => x !== i));
   const reset = () => { setRows(null); setRaw(""); setSource(""); setErr(null); };
@@ -1625,27 +1625,53 @@ function RawData({ items, setItems, setSales, notify, log }) {
     return agg;
   };
 
+  // Like aggregateRows, but for inventory it keeps each distinct expiry as its own
+  // batch (so the same item imported with two expiry dates becomes two batches), while
+  // still summing rows that share both name and expiry. Keyed by normName to match the app.
+  const aggregateInventory = () => {
+    const agg = new Map(); // normName -> { name, unit, buy, sell, batches: Map(expiry -> qty) }
+    rows.forEach((r) => {
+      const key = normName(r.name);
+      if (!key) return;
+      const buy = +r.buyPrice || 0, sell = +r.sellPrice || 0, qty = +r.qty || 0;
+      const expiry = r.expiry || "";
+      let e = agg.get(key);
+      if (!e) { e = { name: r.name.trim(), unit: r.unit, buy, sell, batches: new Map() }; agg.set(key, e); }
+      if (buy) e.buy = buy;
+      if (sell) e.sell = sell;
+      if (r.unit) e.unit = r.unit;
+      e.batches.set(expiry, (e.batches.get(expiry) || 0) + qty);
+    });
+    return agg;
+  };
+
   const commitInventory = () => {
-    const counts = aggregateRows();
+    const counts = aggregateInventory();
     const names = new Set(items.map((i) => normName(i.name)));
     let added = 0, updated = 0;
     counts.forEach((_, key) => (names.has(key) ? updated++ : added++));
     // Functional updater (rebuilds the aggregate per call so it stays correct even if a live
     // cloud snapshot changed `items` since the import was previewed). Always NEW objects.
     setItems((list) => {
-      const agg = aggregateRows();
+      const agg = aggregateInventory();
       const next = list.map((i) => {
-        const a = agg.get(normName(i.name));
-        if (!a) return i;
+        const e = agg.get(normName(i.name));
+        if (!e) return i;
         agg.delete(normName(i.name));
-        return { ...addBatch(i, a.qty, "", todayStr()), buyPrice: a.buy || i.buyPrice, sellPrice: a.sell || i.sellPrice };
+        let updatedItem = { ...i, buyPrice: e.buy || i.buyPrice, sellPrice: e.sell || i.sellPrice };
+        e.batches.forEach((qty, expiry) => { updatedItem = addBatch(updatedItem, qty, expiry, todayStr()); });
+        return updatedItem;
       });
-      agg.forEach((a) => {
-        const sell = a.sell || (a.buy ? Math.round(a.buy * 1.15) : 0);
+      agg.forEach((e) => {
+        const sell = e.sell || (e.buy ? Math.round(e.buy * 1.15) : 0);
+        const batches = [];
+        let stock = 0;
+        e.batches.forEach((qty, expiry) => {
+          if (qty > 0) { batches.push({ id: uid(), qty, expiry: expiry || "", addedOn: todayStr() }); stock += qty; }
+        });
         next.push({
-          id: uid(), name: a.name, code: "", category: "Other", unit: a.unit, icon: iconFor("Other"),
-          buyPrice: a.buy, sellPrice: sell, mrp: sell, stock: a.qty, lowAt: 5,
-          batches: a.qty > 0 ? [{ id: uid(), qty: a.qty, expiry: "", addedOn: todayStr() }] : [], createdAt: todayStr(),
+          id: uid(), name: e.name, code: "", category: "Other", unit: e.unit, icon: iconFor("Other"),
+          buyPrice: e.buy, sellPrice: sell, mrp: sell, stock, lowAt: 5, batches, createdAt: todayStr(),
         });
       });
       return next;
@@ -1710,7 +1736,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
             className="input"
             rows={6}
             placeholder={mode === "inventory"
-              ? "name, qty, buy, sell\nParle-G, 24, 8, 10\nLay's, 40, 16, 20"
+              ? "name, qty, buy, sell, expiry\nParle-G, 24, 8, 10, 2026-12-31\nLay's, 40, 16, 20, 31/12/2026"
               : "name, qty, amount\nParle-G, 5, 50\nLay's, 3, 60"}
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
@@ -1719,7 +1745,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
           <button className="btn" style={{ width: "100%", marginTop: 8 }} onClick={processPaste}>Process pasted data</button>
           {err && <div style={{ color: "#C44536", fontSize: 13, marginTop: 10 }}>{err}</div>}
           <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 12, lineHeight: 1.5 }}>
-            Columns are auto-detected from headers (name / qty / buy / sell / amount). No headers? The name is read first, then numbers fill in as qty, buy, sell, amount — so 1 number is qty, 2 are qty + price, 3 are qty + buy + sell.
+            Columns are auto-detected from headers (name / qty / buy / sell / amount / expiry). No headers? The name is read first, then numbers fill in as qty, buy, sell, amount — so 1 number is qty, 2 are qty + price, 3 are qty + buy + sell. A date-looking column (e.g. 2026-12-31 or 31/12/2026) is treated as the batch expiry.
           </div>
         </section>
 
@@ -1742,7 +1768,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
                   <tr>
                     <th>Item</th><th style={{ width: 58 }}>Qty</th>
                     {mode === "inventory"
-                      ? (<><th style={{ width: 72 }}>Unit</th><th style={{ width: 78 }}>Buy ₹</th><th style={{ width: 78 }}>Sell ₹</th></>)
+                      ? (<><th style={{ width: 72 }}>Unit</th><th style={{ width: 78 }}>Buy ₹</th><th style={{ width: 78 }}>Sell ₹</th><th style={{ width: 140 }}>Expiry</th></>)
                       : (<th style={{ width: 96 }}>Amount ₹</th>)}
                     <th style={{ width: 30 }}></th>
                   </tr>
@@ -1761,6 +1787,7 @@ function RawData({ items, setItems, setSales, notify, log }) {
                           </td>
                           <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.buyPrice} onChange={(e) => edit(i, "buyPrice", e.target.value)} /></td>
                           <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.sellPrice} onChange={(e) => edit(i, "sellPrice", e.target.value)} /></td>
+                          <td><input className="input" style={{ padding: "6px 8px" }} type="date" value={r.expiry || ""} onChange={(e) => edit(i, "expiry", e.target.value)} /></td>
                         </>
                       ) : (
                         <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="0.01" value={r.amount} onChange={(e) => edit(i, "amount", e.target.value)} /></td>
@@ -1768,12 +1795,12 @@ function RawData({ items, setItems, setSales, notify, log }) {
                       <td><button className="btn small danger" aria-label="Remove row" onClick={() => drop(i)}>✕</button></td>
                     </tr>
                   ))}
-                  {rows.length === 0 && <tr><td colSpan={mode === "inventory" ? 6 : 4}><Empty text="No rows yet — click “+ Add row”." /></td></tr>}
+                  {rows.length === 0 && <tr><td colSpan={mode === "inventory" ? 7 : 4}><Empty text="No rows yet — click “+ Add row”." /></td></tr>}
                 </tbody>
               </table>
               <div style={{ fontSize: 12, color: "#6B7E74", margin: "10px 0" }}>
                 {mode === "inventory"
-                  ? "Existing names get restocked; new names create items (blank sell = buy + 15%)."
+                  ? "Existing names get restocked; new names create items (blank sell = buy + 15%). Each row's expiry becomes its own dated batch; leave blank for no expiry."
                   : "Matched item names reduce stock automatically; unmatched lines still record as revenue."}
               </div>
               <button className="btn primary big" style={{ width: "100%" }} disabled={rows.length === 0} onClick={mode === "inventory" ? commitInventory : commitSales}>
