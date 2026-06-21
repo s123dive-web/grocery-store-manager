@@ -1121,6 +1121,8 @@ function Inventory({ items, setItems, notify, log }) {
   const [open, setOpen] = useState(null); // expanded item id (batch detail)
   const [rowEdit, setRowEdit] = useState(null); // inline row edit draft {id, …editable fields}
   const [batchEdit, setBatchEdit] = useState(null); // inline batch editor {id, untracked, rows:[{id,qty,expiry,addedOn}]}
+  const [quickEdit, setQuickEdit] = useState(false); // edit-all-rows mode (no per-row Edit click)
+  const [drafts, setDrafts] = useState(null); // { [id]: {icon,name,code,category,unit,buyPrice,sellPrice,stock,createdAt} }
   const [sort, setSort] = useState({ key: "name", dir: 1 }); // dir: 1 asc, -1 desc
 
   const filtered = items.filter((i) => {
@@ -1286,12 +1288,102 @@ function Inventory({ items, setItems, notify, log }) {
     notify("Batches updated");
   };
 
+  // ----- Quick edit: make every row directly editable at once, applied on one "Save all" -----
+  const draftOf = (i) => ({
+    icon: i.icon || "", name: i.name || "", code: i.code || "",
+    category: i.category || "Other", unit: i.unit || "pc",
+    buyPrice: String(i.buyPrice ?? ""), sellPrice: String(i.sellPrice ?? ""),
+    stock: String(i.stock ?? 0), createdAt: i.createdAt || todayStr(),
+  });
+  const enterQuick = () => {
+    const d = {};
+    items.forEach((i) => { d[i.id] = draftOf(i); });
+    setDrafts(d); setQuickEdit(true); setRowEdit(null); setBatchEdit(null);
+  };
+  const exitQuick = () => { setQuickEdit(false); setDrafts(null); };
+  const setDraft = (id, k, v) => setDrafts((d) => ({ ...d, [id]: { ...d[id], [k]: v } }));
+  const saveAllQuick = () => {
+    const seen = new Map();
+    for (const id of Object.keys(drafts)) {
+      const f = drafts[id];
+      if (!f.name.trim()) return notify("Every item needs a name.");
+      if (!(+f.sellPrice > 0)) return notify(`“${f.name.trim() || "Item"}” needs a selling price greater than 0.`);
+      if (+f.buyPrice < 0 || +f.sellPrice < 0) return notify("Prices cannot be negative.");
+      const nn = normName(f.name);
+      if (seen.has(nn)) return notify(`Duplicate name: “${f.name.trim()}”.`);
+      seen.set(nn, id);
+    }
+    setItems((list) => list.map((i) => {
+      const f = drafts[i.id];
+      if (!f) return i; // items added after entering quick edit are left untouched
+      const newStock = Math.max(0, +f.stock || 0);
+      const diff = newStock - (i.stock || 0);
+      let updated = {
+        ...i,
+        icon: (f.icon || "").trim() || iconFor(f.category),
+        name: f.name.trim(), code: (f.code || "").trim(),
+        category: f.category, unit: f.unit,
+        buyPrice: +f.buyPrice || 0, sellPrice: +f.sellPrice, mrp: +i.mrp || (+f.sellPrice),
+        createdAt: f.createdAt || i.createdAt, updatedAt: todayStr(),
+      };
+      if (diff > 0) updated = addBatch(updated, diff, "", todayStr());
+      else if (diff < 0) updated = removeStock(updated, -diff, todayStr());
+      return updated;
+    }));
+    log("inventory", `Quick-edited ${Object.keys(drafts).length} item(s)`);
+    setQuickEdit(false); setDrafts(null);
+    notify("All changes saved");
+  };
+
   const stop = (e) => e.stopPropagation();
+
+  // Editable cells (icon/name/code, category, added date, buy, sell, margin, stock+unit) shared
+  // by per-row Edit and Quick edit. `d` is the draft, `sf(key,val)` updates it, `actionCell` is
+  // the trailing cell (Save/Cancel for one row, empty in quick mode).
+  const renderEditRow = (i, d, sf, actionCell) => (
+    <tr>
+      <td onClick={stop}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <input className="input" style={{ padding: "6px 4px", width: 38, textAlign: "center" }} value={d.icon} placeholder={iconFor(d.category)} onChange={(e) => sf("icon", e.target.value)} aria-label="Icon" />
+          <input className="input" style={{ padding: "6px 8px", minWidth: 96, flex: 1 }} value={d.name} onChange={(e) => sf("name", e.target.value)} aria-label="Name" />
+          <input className="input" style={{ padding: "6px 8px", width: 84 }} value={d.code} placeholder="code" onChange={(e) => sf("code", e.target.value)} aria-label="Barcode / code" />
+        </div>
+      </td>
+      <td onClick={stop}>
+        <select className="input" style={{ padding: "6px 4px" }} value={d.category} onChange={(e) => sf("category", e.target.value)} aria-label="Category">
+          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+        </select>
+      </td>
+      <td onClick={stop}><input className="input" style={{ padding: "6px 4px" }} type="date" max={todayStr()} value={d.createdAt} onChange={(e) => sf("createdAt", e.target.value)} aria-label="Added date" /></td>
+      <td onClick={stop}><input className="input" style={{ padding: "6px 8px", width: 76, textAlign: "right" }} type="number" min="0" step="0.01" value={d.buyPrice} onChange={(e) => sf("buyPrice", e.target.value)} aria-label="Buy price" /></td>
+      <td onClick={stop}><input className="input" style={{ padding: "6px 8px", width: 76, textAlign: "right" }} type="number" min="0" step="0.01" value={d.sellPrice} onChange={(e) => sf("sellPrice", e.target.value)} aria-label="Sell price" /></td>
+      <td style={{ textAlign: "right", color: "#1B5E43" }}>{+d.buyPrice > 0 ? Math.round(((+d.sellPrice - +d.buyPrice) / +d.buyPrice) * 100) + "%" : "—"}</td>
+      <td onClick={stop}>
+        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+          <input className="input" style={{ padding: "6px 8px", width: 60, textAlign: "right" }} type="number" min="0" value={d.stock} onChange={(e) => sf("stock", e.target.value)} aria-label="Stock" />
+          <select className="input" style={{ padding: "6px 4px" }} value={d.unit} onChange={(e) => sf("unit", e.target.value)} aria-label="Unit">
+            {UNITS.map((u) => <option key={u}>{u}</option>)}
+          </select>
+        </div>
+      </td>
+      {actionCell}
+    </tr>
+  );
 
   return (
     <div>
-      <Header title="Inventory" sub={items.length + " items · click a header to sort · a row to see batches · Edit to change fields inline"}>
-        <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
+      <Header title="Inventory" sub={items.length + " items · click a header to sort · a row to see batches · Edit (or Quick edit) to change fields inline"}>
+        {quickEdit ? (
+          <>
+            <button className="btn primary" onClick={saveAllQuick}>✓ Save all</button>{" "}
+            <button className="btn ghost" onClick={exitQuick}>Cancel</button>
+          </>
+        ) : (
+          <>
+            <button className="btn ghost" onClick={enterQuick} disabled={items.length === 0} title="Edit every row's fields directly, then save once">✎ Quick edit</button>{" "}
+            <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
+          </>
+        )}
       </Header>
 
       <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
@@ -1322,37 +1414,15 @@ function Inventory({ items, setItems, notify, log }) {
               const isOpen = open === i.id;
               return (
                 <Fragment key={i.id}>
-                  {rowEdit?.id === i.id ? (
-                    <tr>
-                      <td onClick={stop}>
-                        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                          <input className="input" style={{ padding: "6px 4px", width: 38, textAlign: "center" }} value={rowEdit.icon} placeholder={iconFor(rowEdit.category)} onChange={(e) => setRowEdit({ ...rowEdit, icon: e.target.value })} aria-label="Icon" />
-                          <input className="input" style={{ padding: "6px 8px", minWidth: 96, flex: 1 }} value={rowEdit.name} onChange={(e) => setRowEdit({ ...rowEdit, name: e.target.value })} aria-label="Name" />
-                          <input className="input" style={{ padding: "6px 8px", width: 84 }} value={rowEdit.code} placeholder="code" onChange={(e) => setRowEdit({ ...rowEdit, code: e.target.value })} aria-label="Barcode / code" />
-                        </div>
-                      </td>
-                      <td onClick={stop}>
-                        <select className="input" style={{ padding: "6px 4px" }} value={rowEdit.category} onChange={(e) => setRowEdit({ ...rowEdit, category: e.target.value })} aria-label="Category">
-                          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-                        </select>
-                      </td>
-                      <td onClick={stop}><input className="input" style={{ padding: "6px 4px" }} type="date" max={todayStr()} value={rowEdit.createdAt} onChange={(e) => setRowEdit({ ...rowEdit, createdAt: e.target.value })} aria-label="Added date" /></td>
-                      <td onClick={stop}><input className="input" style={{ padding: "6px 8px", width: 76, textAlign: "right" }} type="number" min="0" step="0.01" value={rowEdit.buyPrice} onChange={(e) => setRowEdit({ ...rowEdit, buyPrice: e.target.value })} aria-label="Buy price" /></td>
-                      <td onClick={stop}><input className="input" style={{ padding: "6px 8px", width: 76, textAlign: "right" }} type="number" min="0" step="0.01" value={rowEdit.sellPrice} onChange={(e) => setRowEdit({ ...rowEdit, sellPrice: e.target.value })} aria-label="Sell price" /></td>
-                      <td style={{ textAlign: "right", color: "#1B5E43" }}>{+rowEdit.buyPrice > 0 ? Math.round(((+rowEdit.sellPrice - +rowEdit.buyPrice) / +rowEdit.buyPrice) * 100) + "%" : "—"}</td>
-                      <td onClick={stop}>
-                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                          <input className="input" style={{ padding: "6px 8px", width: 60, textAlign: "right" }} type="number" min="0" value={rowEdit.stock} onChange={(e) => setRowEdit({ ...rowEdit, stock: e.target.value })} aria-label="Stock" />
-                          <select className="input" style={{ padding: "6px 4px" }} value={rowEdit.unit} onChange={(e) => setRowEdit({ ...rowEdit, unit: e.target.value })} aria-label="Unit">
-                            {UNITS.map((u) => <option key={u}>{u}</option>)}
-                          </select>
-                        </div>
-                      </td>
+                  {quickEdit && drafts[i.id] ? (
+                    renderEditRow(i, drafts[i.id], (k, v) => setDraft(i.id, k, v), <td />)
+                  ) : rowEdit?.id === i.id ? (
+                    renderEditRow(i, rowEdit, (k, v) => setRowEdit({ ...rowEdit, [k]: v }), (
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }} onClick={stop}>
                         <button className="btn small primary" aria-label="Save item" onClick={saveRowEdit}>✓</button>{" "}
                         <button className="btn small ghost" aria-label="Cancel edit" onClick={() => setRowEdit(null)}>✕</button>
                       </td>
-                    </tr>
+                    ))
                   ) : (
                   <tr style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : i.id)}>
                     <td style={{ fontWeight: 600 }}>
@@ -1377,7 +1447,7 @@ function Inventory({ items, setItems, notify, log }) {
                     </td>
                   </tr>
                   )}
-                  {isOpen && (
+                  {!quickEdit && isOpen && (
                     <tr>
                       <td colSpan={8} style={{ background: "#F7FAF7" }}>
                         {batchEdit?.id === i.id ? (
