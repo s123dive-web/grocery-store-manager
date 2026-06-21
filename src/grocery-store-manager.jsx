@@ -907,8 +907,14 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     const s = q.trim().toLowerCase();
     const inStock = items.filter((i) => (i.stock || 0) > 0);
     if (s) {
+      // A purely numeric query also matches items priced at that amount (sell price or MRP).
+      const isNum = /^\d+(\.\d+)?$/.test(s);
+      const num = isNum ? +s : null;
       return inStock
-        .filter((i) => i.name.toLowerCase().includes(s) || (i.code || "").toLowerCase().includes(s))
+        .filter((i) =>
+          i.name.toLowerCase().includes(s) ||
+          (i.code || "").toLowerCase().includes(s) ||
+          (isNum && (+i.sellPrice === num || +i.mrp === num)))
         .slice(0, 12);
     }
     // No search: most recently sold first, then by units sold, then the rest.
@@ -1018,7 +1024,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
           <input
             ref={searchRef}
             className="input"
-            placeholder="Search or scan barcode… (Enter adds top match)"
+            placeholder="Search name / barcode / price… (Enter adds top match)"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={onSearchKey}
