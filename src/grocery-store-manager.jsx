@@ -881,6 +881,8 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [saleDate, setSaleDate] = useState(todayStr()); // back-date a bill if needed
   const [pay, setPay] = useState("UPI"); // UPI | Cash | Udhari
   const [customer, setCustomer] = useState("");
+  const [miscName, setMiscName] = useState("");
+  const [miscPrice, setMiscPrice] = useState("");
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
 
@@ -930,10 +932,25 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     });
   };
   const setQty = (id, qty) => {
-    const stock = items.find((i) => i.id === id)?.stock ?? 0;
-    if (qty > stock) { notify("Only " + stock + " in stock"); qty = stock; }
+    const line = cart.find((c) => c.id === id);
+    // Misc / custom lines have no inventory item, so they aren't stock-limited.
+    if (line && !line.misc) {
+      const stock = items.find((i) => i.id === id)?.stock ?? 0;
+      if (qty > stock) { notify("Only " + stock + " in stock"); qty = stock; }
+    }
     const q = qty;
     setCart((cart) => (q <= 0 ? cart.filter((c) => c.id !== id) : cart.map((c) => (c.id === id ? { ...c, qty: q } : c))));
+  };
+
+  // A misc / custom item: only a price is required (name optional). It sells like any line but
+  // has no catalogue item, so it never touches inventory stock. buyPrice is 0 (no tracked cost).
+  const addMisc = () => {
+    const price = +miscPrice;
+    if (!(price > 0)) return notify("Enter a price for the misc item.");
+    const name = miscName.trim() || "Misc item";
+    setCart((cart) => [...cart, { id: "misc-" + uid(), name, icon: "🧾", unit: "pc", sellPrice: money(price), buyPrice: 0, qty: 1, misc: true }]);
+    setMiscName(""); setMiscPrice("");
+    notify(`Added “${name}” · ${INR(money(price))}`);
   };
 
   // Enter (or a barcode scanner, which types then sends Enter) adds the best match.
@@ -953,6 +970,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     // Re-check against the latest stock: another device (or a just-synced change) may have
     // reduced it since these lines were added to the cart. Block rather than oversell.
     const short = cart
+      .filter((c) => !c.misc)
       .map((c) => ({ c, stock: items.find((i) => i.id === c.id)?.stock ?? 0 }))
       .filter(({ c, stock }) => c.qty > stock);
     if (short.length) {
@@ -967,7 +985,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       time: now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) + (backDated ? " (back-dated)" : ""),
       // Snapshot buyPrice onto each line so historical profit stays anchored to the cost at
       // sale time, even if the item's cost is changed (or the item deleted) later.
-      lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, buyPrice: c.buyPrice, amount: money(c.sellPrice * c.qty) })),
+      lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, buyPrice: c.buyPrice, amount: money(c.sellPrice * c.qty), ...(c.misc ? { misc: true } : {}) })),
       total, profit,
       payment: pay,
       ...(pay === "Udhari" && customer.trim() ? { customer: customer.trim() } : {}),
@@ -1007,6 +1025,12 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
             aria-label="Search items or scan barcode"
             style={{ marginBottom: 12 }}
           />
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, padding: "8px 10px", background: "#F4F7F4", borderRadius: 8 }}>
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#465", whiteSpace: "nowrap" }}>🧾 Misc</span>
+            <input className="input" style={{ flex: 1, minWidth: 0 }} placeholder="Name (optional)" value={miscName} onChange={(e) => setMiscName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item name" />
+            <input className="input" style={{ width: 86 }} type="number" min="0" step="0.01" placeholder="₹ price" value={miscPrice} onChange={(e) => setMiscPrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item price" />
+            <button className="btn" onClick={addMisc}>+ Add</button>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {results.map((i) => (
               <button key={i.id} className="pick" onClick={() => add(i)} disabled={i.stock <= 0}>
@@ -2120,7 +2144,8 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   const deleteSale = (s) => {
     if (!confirm(`Delete this ${INR(s.total)} bill from ${s.date}? Stock will be added back.`)) return;
     const deltas = {};
-    s.lines.forEach((l) => { deltas[l.name.toLowerCase()] = (deltas[l.name.toLowerCase()] || 0) - l.qty; });
+    // Misc / custom lines have no inventory item, so there is no stock to restore for them.
+    s.lines.forEach((l) => { if (l.misc) return; deltas[l.name.toLowerCase()] = (deltas[l.name.toLowerCase()] || 0) - l.qty; });
     applyDeltas(deltas);
     setSales((all) => all.filter((x) => x.id !== s.id));
     log("sale", `Deleted bill ${INR(s.total)} (${s.date}) — stock restored`);
@@ -2144,8 +2169,9 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     const buyOf = (l) => (l.buyPrice != null ? +l.buyPrice : (items.find((i) => i.name.toLowerCase() === l.name.toLowerCase())?.buyPrice || 0));
     const profit = money(newLines.reduce((a, l) => a + (l.price - buyOf(l)) * l.qty, 0));
     const oldQ = {}, newQ = {};
-    editing.orig.forEach((l) => { const k = l.name.toLowerCase(); oldQ[k] = (oldQ[k] || 0) + l.qty; });
-    newLines.forEach((l) => { const k = l.name.toLowerCase(); newQ[k] = (newQ[k] || 0) + l.qty; });
+    // Misc / custom lines aren't inventory-backed, so they don't drive stock reconciliation.
+    editing.orig.forEach((l) => { if (l.misc) return; const k = l.name.toLowerCase(); oldQ[k] = (oldQ[k] || 0) + l.qty; });
+    newLines.forEach((l) => { if (l.misc) return; const k = l.name.toLowerCase(); newQ[k] = (newQ[k] || 0) + l.qty; });
     const deltas = {};
     [...new Set([...Object.keys(oldQ), ...Object.keys(newQ)])].forEach((k) => { const d = (newQ[k] || 0) - (oldQ[k] || 0); if (d) deltas[k] = d; });
     applyDeltas(deltas);
