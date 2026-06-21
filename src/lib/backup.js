@@ -17,7 +17,7 @@ export function exportJson(data, filename) {
 }
 
 // ---- XLSX ----
-export function exportXlsx({ items, sales, expenses, logs }, filename) {
+export function exportXlsx({ items, sales, expenses, logs, vendorBills }, filename) {
   const wb = XLSX.utils.book_new();
 
   XLSX.utils.book_append_sheet(
@@ -45,6 +45,17 @@ export function exportXlsx({ items, sales, expenses, logs }, filename) {
 
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(expenses.length ? expenses : [{ id: "", date: "", desc: "", amount: "" }]), "Expenses");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(logs.length ? logs : [{ id: "", at: "", date: "", time: "", type: "", message: "" }]), "Logs");
+
+  const bills = vendorBills || [];
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(bills.length ? bills.map((b) => ({
+      id: b.id, vendor: b.vendor, date: b.date, amount: b.amount, category: b.category || "",
+      status: b.status || "", paidAmount: b.paidAmount ?? "", dueDate: b.dueDate || "",
+      fileName: b.fileName || "", fileURL: b.fileURL || "", filePath: b.filePath || "",
+    })) : [{ id: "", vendor: "", date: "", amount: "", category: "", status: "", paidAmount: "", dueDate: "", fileName: "", fileURL: "", filePath: "" }]),
+    "VendorBills"
+  );
 
   XLSX.writeFile(wb, filename);
 }
@@ -78,7 +89,15 @@ export async function importXlsx(file) {
     .filter((r) => r.type)
     .map((r) => ({ id: r.id || rid(), at: num(r.at), date: r.date, time: r.time, type: r.type, message: r.message }));
 
-  return { items, sales, expenses, logs };
+  const vendorBills = sheet("VendorBills")
+    .filter((r) => String(r.vendor || "").trim() || r.fileURL)
+    .map((r) => ({
+      id: r.id || rid(), vendor: String(r.vendor || "").trim(), date: r.date, amount: num(r.amount),
+      category: r.category || "", status: r.status || "unpaid", paidAmount: num(r.paidAmount), dueDate: r.dueDate || "",
+      fileName: r.fileName || "", fileURL: r.fileURL || "", filePath: r.filePath || "",
+    }));
+
+  return { items, sales, expenses, logs, vendorBills };
 }
 
 function rid() {

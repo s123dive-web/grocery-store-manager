@@ -15,7 +15,7 @@
 import { ref, onValue, set, update } from "firebase/database";
 import { db } from "./firebase.js";
 
-export const SLICES = ["items", "sales", "expenses", "logs"];
+export const SLICES = ["items", "sales", "expenses", "logs", "vendorBills"];
 
 const path = (slice) => "shop/" + slice;
 
@@ -30,6 +30,7 @@ const SORTERS = {
   sales: (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id))),
   expenses: (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id))),
   logs: (a, b) => (b.at || 0) - (a.at || 0), // newest first
+  vendorBills: (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : String(b.id).localeCompare(String(a.id))), // newest first
 };
 
 // Accept null / legacy-array / keyed-object → { [id]: record }, keeping only valid records.
