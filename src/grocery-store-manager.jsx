@@ -1893,6 +1893,84 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     notify("Bill updated");
   };
 
+  // ----- Split a bill across multiple dates -----
+  // Replaces one bill with several smaller bills whose amounts (and, in the same
+  // proportion, profit + line amounts) add up to exactly the original. It is purely a
+  // re-dating of money already recorded, so stock is NOT touched. Because the dashboard
+  // and finance views aggregate from the sales list by date/total/profit/lines, the split
+  // parts flow through everywhere and the cumulative stays equal to the original bill.
+  const [splitting, setSplitting] = useState(null);
+  // { id, time, payment, customer, total, profit, lines, parts:[{date, amount}] }
+
+  const addDays = (ds, n) => { const d = new Date(ds + "T00:00"); d.setDate(d.getDate() + n); return dateStr(d); };
+  // Spread an amount equally across n parts as 2-dp money; the last part absorbs the remainder.
+  const equalShares = (amount, n) => {
+    const each = money(amount / n);
+    return Array.from({ length: n }, (_, i) => (i === n - 1 ? money(amount - each * (n - 1)) : each));
+  };
+
+  const openSplit = (s) => setSplitting({
+    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "",
+    total: s.total, profit: s.profit, lines: s.lines,
+    parts: equalShares(s.total, 2).map((amount, i) => ({ date: addDays(s.date, -i), amount })),
+  });
+  const divideEqually = () => setSplitting((sp) => {
+    const shares = equalShares(sp.total, sp.parts.length);
+    return { ...sp, parts: sp.parts.map((p, i) => ({ ...p, amount: shares[i] })) };
+  });
+  const addPart = () => setSplitting((sp) => {
+    const lastDate = sp.parts[sp.parts.length - 1]?.date || todayStr();
+    const parts = [...sp.parts, { date: addDays(lastDate, -1), amount: 0 }];
+    const shares = equalShares(sp.total, parts.length);
+    return { ...sp, parts: parts.map((p, i) => ({ ...p, amount: shares[i] })) };
+  });
+  const removePart = (idx) => setSplitting((sp) => {
+    if (sp.parts.length <= 2) return sp;
+    const parts = sp.parts.filter((_, i) => i !== idx);
+    const shares = equalShares(sp.total, parts.length);
+    return { ...sp, parts: parts.map((p, i) => ({ ...p, amount: shares[i] })) };
+  });
+  const setPartDate = (idx, date) => setSplitting((sp) => ({ ...sp, parts: sp.parts.map((p, i) => (i === idx ? { ...p, date } : p)) }));
+  const setPartAmount = (idx, amount) => setSplitting((sp) => ({ ...sp, parts: sp.parts.map((p, i) => (i === idx ? { ...p, amount } : p)) }));
+
+  const splitSum = splitting ? money(splitting.parts.reduce((a, p) => a + (+p.amount || 0), 0)) : 0;
+  const splitValid = !!splitting
+    && splitting.parts.length >= 2
+    && splitting.parts.every((p) => p.date && (+p.amount || 0) > 0)
+    && splitSum === splitting.total;
+
+  const saveSplit = () => {
+    if (!splitValid) return;
+    const { id, time, payment, customer, total, profit, lines, parts } = splitting;
+    let profAcc = 0;
+    const newSales = parts.map((p, idx) => {
+      const f = (+p.amount) / total;
+      const isLast = idx === parts.length - 1;
+      const prof = isLast ? money(profit - profAcc) : money(profit * f);
+      profAcc = money(profAcc + prof);
+      // Scale each line by the same proportion; nudge the last line so the lines sum to
+      // this part's amount exactly (keeps the bill detail and top-items totals consistent).
+      let amtAcc = 0;
+      const sl = lines.map((l) => {
+        const amount = money((+l.amount || 0) * f);
+        amtAcc = money(amtAcc + amount);
+        return { ...l, qty: Math.round((+l.qty || 0) * f * 1000) / 1000, amount };
+      });
+      if (sl.length) { const d = money((+p.amount) - amtAcc); if (d) sl[sl.length - 1] = { ...sl[sl.length - 1], amount: money(sl[sl.length - 1].amount + d) }; }
+      return {
+        id: uid(), date: p.date,
+        time: `${time || ""} (split ${idx + 1}/${parts.length})`.trim(),
+        lines: sl, total: money(+p.amount), profit: prof,
+        payment, ...(payment === "Udhari" && customer ? { customer } : {}),
+        splitOf: id,
+      };
+    });
+    setSales((all) => all.flatMap((x) => (x.id === id ? newSales : [x])));
+    log("sale", `Split bill ${INR(total)} into ${parts.length} part(s) across ${new Set(parts.map((p) => p.date)).size} date(s)`);
+    setSplitting(null);
+    notify(`Bill split into ${parts.length} parts`);
+  };
+
   return (
     <div>
       <Header title="Sales History" sub={`${visible.length} of ${sales.length} bills · ${INR(rangeTotal)}`} />
@@ -1930,6 +2008,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
                   <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                     <button className="btn small" onClick={() => printReceipt(s)}>🖨 Print</button>
                     <button className="btn small ghost" onClick={() => openEdit(s)}>✎ Edit bill</button>
+                    <button className="btn small ghost" onClick={() => openSplit(s)}>✂ Split</button>
                     <button className="btn small danger" onClick={() => deleteSale(s)}>🗑 Delete</button>
                   </div>
                 </div>
@@ -1965,6 +2044,42 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
           <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 10 }}><span>New total</span><span>{INR(editTotal)}</span></div>
           <div style={{ fontSize: 11.5, color: "#6B7E74", marginTop: 4 }}>Stock adjusts automatically for any quantity change.</div>
           <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={saveEdit}>Save changes</button>
+        </Modal>
+      )}
+
+      {splitting && (
+        <Modal title="Split bill across dates" onClose={() => setSplitting(null)}>
+          <div style={{ fontSize: 12.5, color: "#6B7E74", marginBottom: 10, lineHeight: 1.5 }}>
+            Original total <b>{INR(splitting.total)}</b>. Give each part a date and an amount — by default it's divided equally, but you can enter your own amounts. The parts must add up to exactly the original total. Profit and items are split in the same proportion, so the dashboard and finance graphs stay accurate. (Stock isn't affected.)
+          </div>
+          <table className="tbl">
+            <thead><tr><th>Date</th><th style={{ textAlign: "right" }}>Amount ₹</th><th style={{ width: 30 }}></th></tr></thead>
+            <tbody>
+              {splitting.parts.map((p, idx) => (
+                <tr key={idx}>
+                  <td><input type="date" className="input" style={{ padding: "6px 8px" }} max={todayStr()} value={p.date} onChange={(e) => setPartDate(idx, e.target.value)} /></td>
+                  <td><input type="number" min="0" step="0.01" className="input" style={{ padding: "6px 8px", textAlign: "right" }} value={p.amount} onChange={(e) => setPartAmount(idx, +e.target.value)} /></td>
+                  <td><button className="btn small danger" disabled={splitting.parts.length <= 2} aria-label="Remove part" onClick={() => removePart(idx)}>✕</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <button className="btn small ghost" onClick={addPart}>+ Add date</button>
+            <button className="btn small ghost" onClick={divideEqually}>Divide equally</button>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 12 }}>
+            <span>Split total</span>
+            <span style={{ color: splitSum === splitting.total ? "#1B5E43" : "#C44536" }}>{INR(splitSum)} / {INR(splitting.total)}</span>
+          </div>
+          {splitSum !== splitting.total && (
+            <div style={{ fontSize: 12, color: "#C44536", marginTop: 4 }}>
+              Amounts must add up to exactly {INR(splitting.total)} (off by {INR(money(splitting.total - splitSum))}).
+            </div>
+          )}
+          <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} disabled={!splitValid} onClick={saveSplit}>
+            Save split · {splitting.parts.length} part(s)
+          </button>
         </Modal>
       )}
     </div>
