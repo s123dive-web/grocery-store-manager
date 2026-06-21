@@ -795,7 +795,9 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
   const profit = money(daySales.reduce((a, s) => a + s.profit, 0));
   const stockValue = money(items.reduce((a, i) => a + i.buyPrice * i.stock, 0));
   const month = date.slice(0, 7);
-  const monthRev = money(sales.filter((s) => s.date.startsWith(month)).reduce((a, s) => a + s.total, 0));
+  const monthSales = sales.filter((s) => s.date.startsWith(month));
+  const monthRev = money(monthSales.reduce((a, s) => a + s.total, 0));
+  const monthProfit = money(monthSales.reduce((a, s) => a + s.profit, 0));
   const monthName = new Date(date + "T00:00").toLocaleDateString("en-IN", { month: "long" });
   const niceDate = new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const trend = useMemo(() => {
@@ -815,6 +817,7 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
         <Card label={isToday ? "Today's sales" : "Sales (this day)"} value={INR(rev)} sub={daySales.length + " bills"} />
         <Card label={isToday ? "Today's profit" : "Profit (this day)"} value={INR(profit)} sub="after item cost" accent />
         <Card label={monthName + " revenue"} value={INR(monthRev)} sub="month to date" />
+        <Card label={monthName + " profit"} value={INR(monthProfit)} sub="month to date · after item cost" accent />
         <Card label="Stock value" value={INR(stockValue)} sub={items.length + " items (at cost)"} />
       </div>
 
