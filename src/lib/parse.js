@@ -27,7 +27,8 @@ const HEADER_RULES = [
   ["qty", /\b(qty|quantity|nos|units?|pcs|count|stock|balance|on\s*hand|onhand)\b/i],
   ["unit", /\b(unit|uom|measure|packing|pack)\b/i],
   ["expiry", /\b(expiry|expiration|expires?|exp\.?\s*date|exp|best\s*before|bb|use\s*by|valid\s*(?:till|until|upto))\b/i],
-  ["name", /\b(name|item|product|description|particular|goods|details?|title|sku)\b/i],
+  ["date", /\b(date|paid\s*on|spent\s*on|txn|posted|entry\s*date|expense\s*date)\b/i],
+  ["name", /\b(name|item|product|description|particular|goods|details?|title|sku|expense|head)\b/i],
 ];
 
 const canonUnit = (s) => UNIT_ALIASES[String(s).trim().toLowerCase()] || "";
@@ -92,7 +93,7 @@ function toDateStr(v) {
 const normHeader = (cell) => String(cell ?? "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
 
 function mapHeaderIndices(cells) {
-  const idx = { name: -1, qty: -1, unit: -1, buyPrice: -1, sellPrice: -1, amount: -1, expiry: -1 };
+  const idx = { name: -1, qty: -1, unit: -1, buyPrice: -1, sellPrice: -1, amount: -1, expiry: -1, date: -1 };
   cells.forEach((cell, i) => {
     const c = normHeader(cell);
     for (const [field, re] of HEADER_RULES) {
@@ -144,7 +145,7 @@ function inferRow(cells) {
   } else if (nums.length >= 4) {
     qty = nums[0]; buyPrice = nums[1]; sellPrice = nums[2]; amount = nums[3];
   }
-  return { name, qty: qty || 1, unit: unit || "pc", buyPrice, sellPrice, amount, expiry };
+  return { name, qty: qty || 1, unit: unit || "pc", buyPrice, sellPrice, amount, expiry, date: expiry };
 }
 
 // Core: given a header row + data rows, produce normalised rows.
@@ -175,6 +176,7 @@ function coreMap(headerCells, dataRows, hasHeader) {
       sellPrice: idx.sellPrice >= 0 ? toNum(row[idx.sellPrice]) : "",
       amount: idx.amount >= 0 ? toNum(row[idx.amount]) : "",
       expiry: idx.expiry >= 0 ? toDateStr(row[idx.expiry]) : "",
+      date: idx.date >= 0 ? toDateStr(row[idx.date]) : (idx.expiry >= 0 ? toDateStr(row[idx.expiry]) : ""),
     });
   }
   return out;
