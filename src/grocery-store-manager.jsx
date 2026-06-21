@@ -1116,6 +1116,7 @@ function Inventory({ items, setItems, notify, log }) {
   const [form, setForm] = useState(null); // null | {…item, id?}
   const [restock, setRestock] = useState(null); // {id, name, qty, expiry}
   const [open, setOpen] = useState(null); // expanded item id (batch detail)
+  const [rowEdit, setRowEdit] = useState(null); // inline row edit draft {id, …editable fields}
   const [sort, setSort] = useState({ key: "name", dir: 1 }); // dir: 1 asc, -1 desc
 
   const filtered = items.filter((i) => {
@@ -1211,14 +1212,55 @@ function Inventory({ items, setItems, notify, log }) {
   const del = (i) => {
     if (!confirm("Delete " + i.name + "?")) return;
     setItems((list) => list.filter((x) => x.id !== i.id));
+    if (rowEdit?.id === i.id) setRowEdit(null);
     log("inventory", `Deleted item “${i.name}”`);
+  };
+
+  // ----- Inline row editing: make every on-screen field editable in place -----
+  const startRowEdit = (i) => setRowEdit({
+    id: i.id, icon: i.icon || "", name: i.name || "", code: i.code || "",
+    category: i.category || "Other", unit: i.unit || "pc",
+    buyPrice: String(i.buyPrice ?? ""), sellPrice: String(i.sellPrice ?? ""),
+    stock: String(i.stock ?? 0), createdAt: i.createdAt || todayStr(),
+  });
+  const saveRowEdit = () => {
+    const f = rowEdit;
+    if (!f.name.trim()) return notify("Item name is required");
+    const buy = +f.buyPrice || 0, sell = +f.sellPrice;
+    if (!(sell > 0)) return notify("Selling price must be more than 0");
+    if (buy < 0 || sell < 0) return notify("Prices cannot be negative");
+    const nn = normName(f.name);
+    const clash = items.find((i) => normName(i.name) === nn && i.id !== f.id);
+    if (clash) return notify(`Another item is already named “${clash.name}”.`);
+    const newStock = Math.max(0, +f.stock || 0);
+    const prevForLog = (items.find((i) => i.id === f.id)?.stock) || 0;
+    // Functional updater so a live cloud snapshot mid-edit can't drop other items; the stock
+    // diff is taken from the LIVE row and reconciled into batches (grow → batch, shrink → FIFO).
+    setItems((list) => list.map((i) => {
+      if (i.id !== f.id) return i;
+      const diff = newStock - (i.stock || 0);
+      let updated = {
+        ...i,
+        icon: (f.icon || "").trim() || iconFor(f.category),
+        name: f.name.trim(), code: (f.code || "").trim(),
+        category: f.category, unit: f.unit,
+        buyPrice: buy, sellPrice: sell, mrp: +i.mrp || sell,
+        createdAt: f.createdAt || i.createdAt, updatedAt: todayStr(),
+      };
+      if (diff > 0) updated = addBatch(updated, diff, "", todayStr());
+      else if (diff < 0) updated = removeStock(updated, -diff, todayStr());
+      return updated;
+    }));
+    log("inventory", `Edited item “${f.name.trim()}”` + (newStock !== prevForLog ? ` · stock ${prevForLog}→${newStock}` : ""));
+    setRowEdit(null);
+    notify("Item updated");
   };
 
   const stop = (e) => e.stopPropagation();
 
   return (
     <div>
-      <Header title="Inventory" sub={items.length + " items · click a column header to sort · click a row for batches"}>
+      <Header title="Inventory" sub={items.length + " items · click a header to sort · a row to see batches · Edit to change fields inline"}>
         <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
       </Header>
 
@@ -1250,6 +1292,38 @@ function Inventory({ items, setItems, notify, log }) {
               const isOpen = open === i.id;
               return (
                 <Fragment key={i.id}>
+                  {rowEdit?.id === i.id ? (
+                    <tr>
+                      <td onClick={stop}>
+                        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                          <input className="input" style={{ padding: "6px 4px", width: 38, textAlign: "center" }} value={rowEdit.icon} placeholder={iconFor(rowEdit.category)} onChange={(e) => setRowEdit({ ...rowEdit, icon: e.target.value })} aria-label="Icon" />
+                          <input className="input" style={{ padding: "6px 8px", minWidth: 96, flex: 1 }} value={rowEdit.name} onChange={(e) => setRowEdit({ ...rowEdit, name: e.target.value })} aria-label="Name" />
+                          <input className="input" style={{ padding: "6px 8px", width: 84 }} value={rowEdit.code} placeholder="code" onChange={(e) => setRowEdit({ ...rowEdit, code: e.target.value })} aria-label="Barcode / code" />
+                        </div>
+                      </td>
+                      <td onClick={stop}>
+                        <select className="input" style={{ padding: "6px 4px" }} value={rowEdit.category} onChange={(e) => setRowEdit({ ...rowEdit, category: e.target.value })} aria-label="Category">
+                          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+                        </select>
+                      </td>
+                      <td onClick={stop}><input className="input" style={{ padding: "6px 4px" }} type="date" max={todayStr()} value={rowEdit.createdAt} onChange={(e) => setRowEdit({ ...rowEdit, createdAt: e.target.value })} aria-label="Added date" /></td>
+                      <td onClick={stop}><input className="input" style={{ padding: "6px 8px", width: 76, textAlign: "right" }} type="number" min="0" step="0.01" value={rowEdit.buyPrice} onChange={(e) => setRowEdit({ ...rowEdit, buyPrice: e.target.value })} aria-label="Buy price" /></td>
+                      <td onClick={stop}><input className="input" style={{ padding: "6px 8px", width: 76, textAlign: "right" }} type="number" min="0" step="0.01" value={rowEdit.sellPrice} onChange={(e) => setRowEdit({ ...rowEdit, sellPrice: e.target.value })} aria-label="Sell price" /></td>
+                      <td style={{ textAlign: "right", color: "#1B5E43" }}>{+rowEdit.buyPrice > 0 ? Math.round(((+rowEdit.sellPrice - +rowEdit.buyPrice) / +rowEdit.buyPrice) * 100) + "%" : "—"}</td>
+                      <td onClick={stop}>
+                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                          <input className="input" style={{ padding: "6px 8px", width: 60, textAlign: "right" }} type="number" min="0" value={rowEdit.stock} onChange={(e) => setRowEdit({ ...rowEdit, stock: e.target.value })} aria-label="Stock" />
+                          <select className="input" style={{ padding: "6px 4px" }} value={rowEdit.unit} onChange={(e) => setRowEdit({ ...rowEdit, unit: e.target.value })} aria-label="Unit">
+                            {UNITS.map((u) => <option key={u}>{u}</option>)}
+                          </select>
+                        </div>
+                      </td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }} onClick={stop}>
+                        <button className="btn small primary" aria-label="Save item" onClick={saveRowEdit}>✓</button>{" "}
+                        <button className="btn small ghost" aria-label="Cancel edit" onClick={() => setRowEdit(null)}>✕</button>
+                      </td>
+                    </tr>
+                  ) : (
                   <tr style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : i.id)}>
                     <td style={{ fontWeight: 600 }}>
                       <span style={{ marginRight: 6 }}>{i.icon || "📦"}</span>{i.name}
@@ -1267,10 +1341,12 @@ function Inventory({ items, setItems, notify, log }) {
                     </td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn small" onClick={(e) => { stop(e); setRestock({ id: i.id, name: i.name, qty: "", expiry: "" }); }}>Restock</button>{" "}
-                      <button className="btn small ghost" onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", expiry: "" }); }}>Edit</button>{" "}
+                      <button className="btn small ghost" onClick={(e) => { stop(e); startRowEdit(i); }}>Edit</button>{" "}
+                      <button className="btn small ghost" title="More fields (MRP, low-stock alert, dated stock)" aria-label={"More fields for " + i.name} onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", expiry: "" }); }}>⚙</button>{" "}
                       <button className="btn small danger" aria-label={"Delete " + i.name} onClick={(e) => { stop(e); del(i); }}>✕</button>
                     </td>
                   </tr>
+                  )}
                   {isOpen && (
                     <tr>
                       <td colSpan={8} style={{ background: "#F7FAF7" }}>
