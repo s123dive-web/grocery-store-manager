@@ -1913,7 +1913,26 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "",
     total: s.total, profit: s.profit, lines: s.lines,
     parts: equalShares(s.total, 2).map((amount, i) => ({ date: addDays(s.date, -i), amount })),
+    rangeFrom: addDays(s.date, -1), rangeTo: s.date,
   });
+  // Every calendar day in [from, to] inclusive.
+  const datesInRange = (from, to) => {
+    if (!from || !to || from > to) return [];
+    const out = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) out.push(d);
+    return out;
+  };
+  const setRangeFrom = (v) => setSplitting((sp) => ({ ...sp, rangeFrom: v }));
+  const setRangeTo = (v) => setSplitting((sp) => ({ ...sp, rangeTo: v }));
+  // Fill one part per day across the range, divided equally (still editable afterwards).
+  const applyRange = () => {
+    if (!splitting) return;
+    const dates = datesInRange(splitting.rangeFrom, splitting.rangeTo);
+    if (!dates.length) return notify("Pick a valid range — From must be on or before To.");
+    if (dates.length > 90) return notify("Range too large — keep it within 90 days.");
+    const shares = equalShares(splitting.total, dates.length);
+    setSplitting((sp) => ({ ...sp, parts: dates.map((date, i) => ({ date, amount: shares[i] })) }));
+  };
   const divideEqually = () => setSplitting((sp) => {
     const shares = equalShares(sp.total, sp.parts.length);
     return { ...sp, parts: sp.parts.map((p, i) => ({ ...p, amount: shares[i] })) };
@@ -2051,6 +2070,15 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
         <Modal title="Split bill across dates" onClose={() => setSplitting(null)}>
           <div style={{ fontSize: 12.5, color: "#6B7E74", marginBottom: 10, lineHeight: 1.5 }}>
             Original total <b>{INR(splitting.total)}</b>. Give each part a date and an amount — by default it's divided equally, but you can enter your own amounts. The parts must add up to exactly the original total. Profit and items are split in the same proportion, so the dashboard and finance graphs stay accurate. (Stock isn't affected.)
+          </div>
+          <div style={{ background: "#F4F7F4", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: "#465", marginBottom: 6 }}>Split over a date range</div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} max={splitting.rangeTo || todayStr()} value={splitting.rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} /></label>
+              <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} max={todayStr()} value={splitting.rangeTo} onChange={(e) => setRangeTo(e.target.value)} /></label>
+              <button className="btn small" onClick={applyRange}>Fill range</button>
+            </div>
+            <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 6 }}>Creates one part per day in the range, divided equally — then edit any amount below.</div>
           </div>
           <table className="tbl">
             <thead><tr><th>Date</th><th style={{ textAlign: "right" }}>Amount ₹</th><th style={{ width: 30 }}></th></tr></thead>
