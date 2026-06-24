@@ -920,14 +920,15 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       // A purely numeric query also matches items priced at that amount (sell price or MRP).
       const isNum = /^\d+(\.\d+)?$/.test(s);
       const num = isNum ? +s : null;
-      // While searching, also surface out-of-stock items (for reference) — but always last.
-      return items
-        .filter((i) =>
-          i.name.toLowerCase().includes(s) ||
-          (i.code || "").toLowerCase().includes(s) ||
-          (isNum && (+i.sellPrice === num || +i.mrp === num)))
-        .sort((a, b) => ((b.stock || 0) > 0) - ((a.stock || 0) > 0))
-        .slice(0, 12);
+      // While searching, also surface out-of-stock items (for reference) — but always last,
+      // and on their own budget so a long list of in-stock matches can't crowd them out.
+      const matches = items.filter((i) =>
+        i.name.toLowerCase().includes(s) ||
+        (i.code || "").toLowerCase().includes(s) ||
+        (isNum && (+i.sellPrice === num || +i.mrp === num)));
+      const inStockMatches = matches.filter((i) => (i.stock || 0) > 0);
+      const outMatches = matches.filter((i) => (i.stock || 0) <= 0);
+      return [...inStockMatches.slice(0, 12), ...outMatches.slice(0, 8)];
     }
     // No search: most recently sold first, then by units sold, then the rest.
     return [...inStock].sort((a, b) => {
@@ -3623,7 +3624,7 @@ const CSS = `
   .btn.danger { background:#FBEAE7; color:#C44536; }
   .pick { text-align:left; background:#F6FAF6; border:1.5px solid #DDE8DE; border-radius:11px; padding:10px 12px; cursor:pointer; font-family:inherit; }
   .pick:hover:not(:disabled) { border-color:#1B5E43; background:#fff; }
-  .pick:disabled { opacity:.45; cursor:not-allowed; }
+  .pick:disabled { opacity:.7; cursor:not-allowed; background:#F0F2F0; }
   .qty { width:26px; height:26px; border-radius:7px; border:1.5px solid #D0C7AB; background:#fff; font-size:15px; font-weight:700; cursor:pointer; line-height:1; }
   .tbl { width:100%; border-collapse:collapse; font-size:13.5px; }
   .tbl th { text-align:left; font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:#7A8C81; padding:6px 8px; border-bottom:2px solid #E2EAE3; }
