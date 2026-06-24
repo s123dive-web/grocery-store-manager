@@ -893,6 +893,8 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [customer, setCustomer] = useState("");
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
+  const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
+  const [stockQty, setStockQty] = useState("");
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
 
@@ -963,6 +965,16 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
 
   // A misc / custom item: only a price is required (name optional). It sells like any line but
   // has no catalogue item, so it never touches inventory stock. buyPrice is 0 (no tracked cost).
+  // Quick restock straight from the billing picker (so a 0-stock item becomes sellable here).
+  const quickRestock = (item) => {
+    const qty = +stockQty;
+    if (!(qty > 0)) return notify("Enter a quantity to add.");
+    setItems((list) => list.map((i) => (i.id === item.id ? addBatch(i, qty, "", todayStr()) : i)));
+    log("inventory", `Restocked “${item.name}” +${qty} (from billing)`);
+    notify(`Added ${qty} ${item.unit} to ${item.name}`);
+    setStockFor(null); setStockQty("");
+  };
+
   const addMisc = () => {
     const price = +miscPrice;
     if (!(price > 0)) return notify("Enter a price for the misc item.");
@@ -1051,14 +1063,32 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
             <button className="btn" onClick={addMisc}>+ Add</button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            {results.map((i) => (
-              <button key={i.id} className="pick" onClick={() => add(i)} disabled={i.stock <= 0}>
+            {results.map((i) => i.stock > 0 ? (
+              <button key={i.id} className="pick" onClick={() => add(i)}>
                 <div style={{ fontWeight: 700, fontSize: 13.5 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
                   <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
-                  <span style={{ color: i.stock <= i.lowAt ? "#C44536" : "#789" }}>{i.stock <= 0 ? "Out of stock" : i.stock + " left"}</span>
+                  <span style={{ color: i.stock <= i.lowAt ? "#C44536" : "#789" }}>{i.stock + " left"}</span>
                 </div>
               </button>
+            ) : (
+              <div key={i.id} className="pick" style={{ cursor: "default", background: "#F0F2F0" }}>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
+                  <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
+                  <span style={{ color: "#C44536", fontWeight: 600 }}>Out of stock</span>
+                </div>
+                {stockFor === i.id ? (
+                  <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
+                    <input className="input" style={{ padding: "5px 7px", width: 64 }} type="number" min="1" autoFocus placeholder="Qty" value={stockQty}
+                      onChange={(e) => setStockQty(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") quickRestock(i); }} />
+                    <button className="btn small primary" onClick={() => quickRestock(i)}>Add</button>
+                    <button className="btn small ghost" aria-label="Cancel" onClick={() => { setStockFor(null); setStockQty(""); }}>✕</button>
+                  </div>
+                ) : (
+                  <button className="btn small" style={{ marginTop: 8 }} onClick={() => { setStockFor(i.id); setStockQty(""); }}>＋ Add stock</button>
+                )}
+              </div>
             ))}
             {results.length === 0 && <Empty text="No items match. Add it from Inventory first." />}
           </div>
