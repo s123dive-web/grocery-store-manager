@@ -1063,33 +1063,29 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
             <button className="btn" onClick={addMisc}>+ Add</button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            {results.map((i) => i.stock > 0 ? (
-              <button key={i.id} className="pick" onClick={() => add(i)}>
-                <div style={{ fontWeight: 700, fontSize: 13.5 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
-                  <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
-                  <span style={{ color: i.stock <= i.lowAt ? "#C44536" : "#789" }}>{i.stock + " left"}</span>
-                </div>
-              </button>
-            ) : (
-              <div key={i.id} className="pick" style={{ cursor: "default", background: "#F0F2F0" }}>
-                <div style={{ fontWeight: 700, fontSize: 13.5 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
-                  <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
-                  <span style={{ color: "#C44536", fontWeight: 600 }}>Out of stock</span>
-                </div>
-                {stockFor === i.id ? (
-                  <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
-                    <input className="input" style={{ padding: "5px 7px", width: 64 }} type="number" min="1" autoFocus placeholder="Qty" value={stockQty}
-                      onChange={(e) => setStockQty(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") quickRestock(i); }} />
-                    <button className="btn small primary" onClick={() => quickRestock(i)}>Add</button>
-                    <button className="btn small ghost" aria-label="Cancel" onClick={() => { setStockFor(null); setStockQty(""); }}>✕</button>
+            {results.map((i) => {
+              const inStock = (i.stock || 0) > 0;
+              const editing = stockFor === i.id;
+              return (
+                <div key={i.id} className="pick" style={{ position: "relative", cursor: inStock ? "pointer" : "default", background: inStock ? undefined : "#F0F2F0" }} onClick={inStock ? () => add(i) : undefined}>
+                  <button title="Add stock" aria-label={"Add stock to " + i.name} onClick={(e) => { e.stopPropagation(); setStockFor(editing ? null : i.id); setStockQty(""); }}
+                    style={{ position: "absolute", top: 6, right: 6, width: 22, height: 22, borderRadius: 6, border: "1px solid #BBD3C2", background: "#fff", color: "#1B5E43", fontWeight: 800, cursor: "pointer", lineHeight: 1, padding: 0 }}>＋</button>
+                  <div style={{ fontWeight: 700, fontSize: 13.5, paddingRight: 26 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
+                    <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
+                    <span style={{ color: !inStock || i.stock <= i.lowAt ? "#C44536" : "#789", fontWeight: !inStock ? 600 : 400 }}>{!inStock ? "Out of stock" : i.stock + " left"}</span>
                   </div>
-                ) : (
-                  <button className="btn small" style={{ marginTop: 8 }} onClick={() => { setStockFor(i.id); setStockQty(""); }}>＋ Add stock</button>
-                )}
-              </div>
-            ))}
+                  {editing && (
+                    <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
+                      <input className="input" style={{ padding: "5px 7px", width: 64 }} type="number" min="1" autoFocus placeholder="Qty" value={stockQty}
+                        onChange={(e) => setStockQty(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") quickRestock(i); }} />
+                      <button className="btn small primary" onClick={() => quickRestock(i)}>Add</button>
+                      <button className="btn small ghost" aria-label="Cancel" onClick={() => { setStockFor(null); setStockQty(""); }}>✕</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             {results.length === 0 && <Empty text="No items match. Add it from Inventory first." />}
           </div>
         </section>
