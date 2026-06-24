@@ -101,6 +101,7 @@ function printReceipt(sale) {
     <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
     </table>
     ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
+    ${sale.customer || sale.mobile ? `<div class="meta">Customer: ${escapeHtml(sale.customer || "—")}${sale.mobile ? " · " + escapeHtml(sale.mobile) : ""}</div>` : ""}
     <div class="ft">Thank you! Please visit again.</div>
     <div class="pay">
       <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
@@ -891,6 +892,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [saleDate, setSaleDate] = useState(todayStr()); // back-date a bill if needed
   const [pay, setPay] = useState("UPI"); // UPI | Cash | Udhari
   const [customer, setCustomer] = useState("");
+  const [mobile, setMobile] = useState("");
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
@@ -1019,7 +1021,9 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, buyPrice: c.buyPrice, amount: money(c.sellPrice * c.qty), ...(c.misc ? { misc: true } : {}) })),
       total, profit,
       payment: pay,
-      ...(pay === "Udhari" && customer.trim() ? { customer: customer.trim() } : {}),
+      // Customer name & mobile are optional on any bill (not just Udhari).
+      ...(customer.trim() ? { customer: customer.trim() } : {}),
+      ...(mobile.trim() ? { mobile: mobile.trim() } : {}),
     };
     setSales((s) => [...s, sale]);
     setItems((its) => its.map((i) => {
@@ -1027,10 +1031,11 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       return c ? removeStock(i, c.qty, saleDate) : i; // FIFO deplete batches by expiry
     }));
     setLastSale(sale);
-    log("sale", `Bill ${INR(total)} · ${cart.length} item(s) · ${pay}` + (pay === "Udhari" && customer.trim() ? ` (${customer.trim()})` : "") + (backDated ? ` · back-dated to ${saleDate}` : ""));
+    log("sale", `Bill ${INR(total)} · ${cart.length} item(s) · ${pay}` + (customer.trim() ? ` (${customer.trim()})` : "") + (backDated ? ` · back-dated to ${saleDate}` : ""));
     setCart([]);
     setQ("");
     setCustomer("");
+    setMobile("");
     searchRef.current?.focus();
     notify(`Bill saved (${pay}) — ` + INR(total));
   };
@@ -1130,9 +1135,10 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
                   </button>
                 ))}
               </div>
-              {pay === "Udhari" && (
-                <input className="input" style={{ marginTop: 8 }} placeholder="Customer name (paying later)" value={customer} onChange={(e) => setCustomer(e.target.value)} />
-              )}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
+                <input className="input" placeholder={pay === "Udhari" ? "Customer name (owes)" : "Customer name (optional)"} value={customer} onChange={(e) => setCustomer(e.target.value)} aria-label="Customer name" />
+                <input className="input" type="tel" inputMode="numeric" maxLength={15} placeholder="Mobile (optional)" value={mobile} onChange={(e) => setMobile(e.target.value)} aria-label="Customer mobile" />
+              </div>
               {pay === "UPI" && (
                 <div style={{ textAlign: "center", marginTop: 10, padding: 8, background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10 }}>
                   <img src={PAYMENT_QR_SRC} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain" }} />
@@ -2243,7 +2249,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   };
 
   const openSplit = (s) => setSplitting({
-    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "",
+    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "", mobile: s.mobile || "",
     total: s.total, profit: s.profit, lines: s.lines,
     parts: equalShares(s.total, 2).map((amount, i) => ({ date: addDays(s.date, -i), amount })),
     rangeFrom: addDays(s.date, -1), rangeTo: s.date,
@@ -2302,7 +2308,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
 
   const saveSplit = () => {
     if (!splitValid) return;
-    const { id, time, payment, customer, total, profit, lines } = splitting;
+    const { id, time, payment, customer, mobile, total, profit, lines } = splitting;
     // Snap the last part to absorb any sub-paisa residual so the parts sum to EXACTLY total.
     const exceptLast = money(splitting.parts.slice(0, -1).reduce((a, p) => a + (+p.amount || 0), 0));
     const parts = splitting.parts.map((p, i, arr) =>
@@ -2326,7 +2332,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
         id: uid(), date: p.date,
         time: `${time || ""} (split ${idx + 1}/${parts.length})`.trim(),
         lines: sl, total: money(+p.amount), profit: prof,
-        payment, ...(payment === "Udhari" && customer ? { customer } : {}),
+        payment, ...(customer ? { customer } : {}), ...(mobile ? { mobile } : {}),
         splitOf: id,
       };
     });
@@ -2359,7 +2365,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
               <div style={{ ...S.row, cursor: "pointer" }} onClick={() => setOpen(open === s.id ? null : s.id)}>
                 <span>
                   {s.time} · {s.lines.length} item{s.lines.length > 1 ? "s" : ""}
-                  {s.payment && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: PAY_COLORS[s.payment] || "#789", border: `1px solid ${PAY_COLORS[s.payment] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{s.payment}{s.customer ? " · " + s.customer : ""}</span>}
+                  {s.payment && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: PAY_COLORS[s.payment] || "#789", border: `1px solid ${PAY_COLORS[s.payment] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{s.payment}{s.customer ? " · " + s.customer : ""}{s.mobile ? " · " + s.mobile : ""}</span>}
                 </span>
                 <span><b>{INR(s.total)}</b> <span style={{ color: "#1B5E43", fontSize: 12 }}>(+{INR(s.profit)})</span> {open === s.id ? "▾" : "▸"}</span>
               </div>
