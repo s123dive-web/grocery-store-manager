@@ -920,11 +920,13 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       // A purely numeric query also matches items priced at that amount (sell price or MRP).
       const isNum = /^\d+(\.\d+)?$/.test(s);
       const num = isNum ? +s : null;
-      return inStock
+      // While searching, also surface out-of-stock items (for reference) — but always last.
+      return items
         .filter((i) =>
           i.name.toLowerCase().includes(s) ||
           (i.code || "").toLowerCase().includes(s) ||
           (isNum && (+i.sellPrice === num || +i.mrp === num)))
+        .sort((a, b) => ((b.stock || 0) > 0) - ((a.stock || 0) > 0))
         .slice(0, 12);
     }
     // No search: most recently sold first, then by units sold, then the rest.
