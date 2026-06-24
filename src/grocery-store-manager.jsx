@@ -3028,6 +3028,7 @@ function VendorBills({ bills, setBills, online, notify, log }) {
   const [editId, setEditId] = useState(null);
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
   const fileRef = useRef(null);
   // filters
   const [from, setFrom] = useState("");
@@ -3048,7 +3049,7 @@ function VendorBills({ bills, setBills, online, notify, log }) {
     if (busy) return;
     if (!form.vendor.trim()) return notify("Vendor name is required.");
     if (!(+form.amount > 0)) return notify("Enter a bill amount greater than 0.");
-    setBusy(true);
+    setBusy(true); setErr("");
     try {
       const id = editId || uid();
       let proof = null;
@@ -3071,7 +3072,14 @@ function VendorBills({ bills, setBills, online, notify, log }) {
       resetForm();
     } catch (e) {
       console.error("bill save failed", e);
-      notify("⚠ Couldn't save — the proof upload failed. Check internet & Firebase Storage rules, then retry.");
+      const code = e?.code || e?.message || "unknown";
+      setErr(`Upload failed (${code}). The bill was NOT saved. ` + (
+        code.includes("unauthorized") || code.includes("unauthenticated") ? "Firebase Storage rules are blocking it — publish the rule from the Storage → Rules page."
+          : code.includes("object-not-found") || code.includes("bucket") || code.includes("unknown") ? "Firebase Storage isn't set up for this project — open Storage in the console and click ‘Get started’ to create the bucket."
+            : code.includes("retry-limit") || code.includes("network") ? "Network/CORS problem — check the connection and retry."
+              : "Open the browser console for details."
+      ));
+      notify("⚠ Proof upload failed — see the message in the form.");
     } finally {
       setBusy(false);
     }
@@ -3156,6 +3164,12 @@ function VendorBills({ bills, setBills, online, notify, log }) {
           </Field>
           {editId && !file && (() => { const cur = bills.find((b) => b.id === editId); return cur?.fileURL ? <div style={{ fontSize: 11.5, color: "#6B7E74", marginTop: -6, marginBottom: 6 }}>Current proof: <a href={cur.fileURL} target="_blank" rel="noopener noreferrer">{cur.fileName || "view"}</a> — choose a file to replace it.</div> : null; })()}
           <div style={{ fontSize: 11, color: "#8A9C90", marginBottom: 10 }}>JPG/PNG/PDF/DOC/XLS… up to 10 MB. Stored securely in the cloud.</div>
+          {err && (
+            <div style={{ fontSize: 12, color: "#C44536", background: "#FBEDEB", border: "1px solid #E2B6B0", borderRadius: 8, padding: "8px 10px", marginBottom: 10, lineHeight: 1.5 }}>
+              {err}
+              {file && <div style={{ marginTop: 6 }}><button className="btn small ghost" disabled={busy} onClick={() => { setFile(null); if (fileRef.current) fileRef.current.value = ""; setErr(""); notify("Proof removed — you can save the bill without it for now."); }}>Save without proof instead</button></div>}
+            </div>
+          )}
           <button className="btn primary big" style={{ width: "100%" }} disabled={busy} onClick={save}>{busy ? "Saving…" : editId ? "Save changes" : "Save bill"}</button>
           {editId && <button className="btn ghost" style={{ width: "100%", marginTop: 8 }} disabled={busy} onClick={resetForm}>Cancel edit</button>}
         </section>
