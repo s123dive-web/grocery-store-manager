@@ -102,6 +102,7 @@ function printReceipt(sale) {
     </table>
     ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
     ${sale.customer || sale.mobile ? `<div class="meta">Customer: ${escapeHtml(sale.customer || "—")}${sale.mobile ? " · " + escapeHtml(sale.mobile) : ""}</div>` : ""}
+    ${sale.payment === "Udhari" ? `<div class="meta">Paid now: ${INR(sale.paid || 0)} &nbsp; Balance due: ${INR(Math.max(0, (sale.total || 0) - (sale.paid || 0)))}</div>` : ""}
     <div class="ft">Thank you! Please visit again.</div>
     <div class="pay">
       <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
@@ -893,6 +894,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [pay, setPay] = useState("UPI"); // UPI | Cash | Udhari
   const [customer, setCustomer] = useState("");
   const [mobile, setMobile] = useState("");
+  const [paidNow, setPaidNow] = useState(""); // Udhari part-payment taken at billing time
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
@@ -1024,6 +1026,8 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       // Customer name & mobile are optional on any bill (not just Udhari).
       ...(customer.trim() ? { customer: customer.trim() } : {}),
       ...(mobile.trim() ? { mobile: mobile.trim() } : {}),
+      // For Udhari (credit), record how much was paid now; the rest stays outstanding.
+      ...(pay === "Udhari" ? { paid: Math.min(total, Math.max(0, money(+paidNow || 0))) } : {}),
     };
     setSales((s) => [...s, sale]);
     setItems((its) => its.map((i) => {
@@ -1036,6 +1040,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     setQ("");
     setCustomer("");
     setMobile("");
+    setPaidNow("");
     searchRef.current?.focus();
     notify(`Bill saved (${pay}) — ` + INR(total));
   };
@@ -1139,6 +1144,18 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
                 <input className="input" placeholder={pay === "Udhari" ? "Customer name (owes)" : "Customer name (optional)"} value={customer} onChange={(e) => setCustomer(e.target.value)} aria-label="Customer name" />
                 <input className="input" type="tel" inputMode="numeric" maxLength={15} placeholder="Mobile (optional)" value={mobile} onChange={(e) => setMobile(e.target.value)} aria-label="Customer mobile" />
               </div>
+              {pay === "Udhari" && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input className="input" style={{ flex: 1 }} type="number" min="0" step="0.01" max={total} placeholder="Paid now (optional)" value={paidNow} onChange={(e) => setPaidNow(e.target.value)} aria-label="Amount paid now" />
+                    <button className="btn small ghost" onClick={() => setPaidNow(String(total))}>Full</button>
+                  </div>
+                  <div style={{ fontSize: 12, textAlign: "right", marginTop: 4, color: "#C44536", fontWeight: 600 }}>
+                    On credit (udhari): {INR(Math.max(0, money(total - (+paidNow || 0))))}
+                    {+paidNow > 0 && <span style={{ color: "#1B5E43", fontWeight: 500 }}> · paid {INR(Math.min(total, money(+paidNow)))}</span>}
+                  </div>
+                </div>
+              )}
               {pay === "UPI" && (
                 <div style={{ textAlign: "center", marginTop: 10, padding: 8, background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10 }}>
                   <img src={PAYMENT_QR_SRC} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain" }} />
@@ -2204,7 +2221,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   };
 
   const openEdit = (s) => setEditing({
-    id: s.id, date: s.date, payment: s.payment || "UPI",
+    id: s.id, date: s.date, payment: s.payment || "UPI", paid: s.paid != null ? String(s.paid) : "",
     lines: s.lines.map((l) => ({ ...l })), orig: s.lines.map((l) => ({ ...l })),
   });
   const editLine = (idx, qty) => setEditing((e) => ({ ...e, lines: e.lines.map((l, i) => (i === idx ? { ...l, qty: Math.max(0, qty || 0) } : l)) }));
@@ -2226,7 +2243,13 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     const deltas = {};
     [...new Set([...Object.keys(oldQ), ...Object.keys(newQ)])].forEach((k) => { const d = (newQ[k] || 0) - (oldQ[k] || 0); if (d) deltas[k] = d; });
     applyDeltas(deltas);
-    setSales((all) => all.map((x) => (x.id === editing.id ? { ...x, date: editing.date || x.date, payment: editing.payment, lines: newLines, total, profit } : x)));
+    const paid = editing.payment === "Udhari" ? Math.min(total, Math.max(0, money(+editing.paid || 0))) : undefined;
+    setSales((all) => all.map((x) => {
+      if (x.id !== editing.id) return x;
+      const next = { ...x, date: editing.date || x.date, payment: editing.payment, lines: newLines, total, profit };
+      if (editing.payment === "Udhari") next.paid = paid; else delete next.paid;
+      return next;
+    }));
     log("sale", `Edited bill → ${INR(total)} · ${newLines.length} line(s) · ${editing.payment}`);
     setEditing(null);
     notify("Bill updated");
@@ -2249,7 +2272,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   };
 
   const openSplit = (s) => setSplitting({
-    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "", mobile: s.mobile || "",
+    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "", mobile: s.mobile || "", paid: s.paid || 0,
     total: s.total, profit: s.profit, lines: s.lines,
     parts: equalShares(s.total, 2).map((amount, i) => ({ date: addDays(s.date, -i), amount })),
     rangeFrom: addDays(s.date, -1), rangeTo: s.date,
@@ -2308,17 +2331,20 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
 
   const saveSplit = () => {
     if (!splitValid) return;
-    const { id, time, payment, customer, mobile, total, profit, lines } = splitting;
+    const { id, time, payment, customer, mobile, paid, total, profit, lines } = splitting;
     // Snap the last part to absorb any sub-paisa residual so the parts sum to EXACTLY total.
     const exceptLast = money(splitting.parts.slice(0, -1).reduce((a, p) => a + (+p.amount || 0), 0));
     const parts = splitting.parts.map((p, i, arr) =>
       ({ ...p, amount: i === arr.length - 1 ? money(total - exceptLast) : money(+p.amount || 0) }));
-    let profAcc = 0;
+    let profAcc = 0, paidAcc = 0;
     const newSales = parts.map((p, idx) => {
       const f = (+p.amount) / total;
       const isLast = idx === parts.length - 1;
       const prof = isLast ? money(profit - profAcc) : money(profit * f);
       profAcc = money(profAcc + prof);
+      // Distribute any Udhari part-payment proportionally too (remainder on the last part).
+      const partPaid = isLast ? money((+paid || 0) - paidAcc) : money((+paid || 0) * f);
+      paidAcc = money(paidAcc + partPaid);
       // Scale each line by the same proportion; nudge the last line so the lines sum to
       // this part's amount exactly (keeps the bill detail and top-items totals consistent).
       let amtAcc = 0;
@@ -2333,6 +2359,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
         time: `${time || ""} (split ${idx + 1}/${parts.length})`.trim(),
         lines: sl, total: money(+p.amount), profit: prof,
         payment, ...(customer ? { customer } : {}), ...(mobile ? { mobile } : {}),
+        ...(payment === "Udhari" ? { paid: partPaid } : {}),
         splitOf: id,
       };
     });
@@ -2367,7 +2394,9 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
                   {s.time} · {s.lines.length} item{s.lines.length > 1 ? "s" : ""}
                   {s.payment && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: PAY_COLORS[s.payment] || "#789", border: `1px solid ${PAY_COLORS[s.payment] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{s.payment}{s.customer ? " · " + s.customer : ""}{s.mobile ? " · " + s.mobile : ""}</span>}
                 </span>
-                <span><b>{INR(s.total)}</b> <span style={{ color: "#1B5E43", fontSize: 12 }}>(+{INR(s.profit)})</span> {open === s.id ? "▾" : "▸"}</span>
+                <span><b>{INR(s.total)}</b> <span style={{ color: "#1B5E43", fontSize: 12 }}>(+{INR(s.profit)})</span>
+                  {s.payment === "Udhari" && (s.total - (s.paid || 0)) > 0 && <span style={{ color: "#C44536", fontSize: 11.5, fontWeight: 700, marginLeft: 6 }}>{INR(money(s.total - (s.paid || 0)))} due</span>}
+                  {" "}{open === s.id ? "▾" : "▸"}</span>
               </div>
               {open === s.id && (
                 <div style={{ background: "#F4F7F4", borderRadius: 8, padding: "8px 12px", margin: "0 0 8px" }}>
@@ -2413,6 +2442,17 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
             </tbody>
           </table>
           <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 10 }}><span>New total</span><span>{INR(editTotal)}</span></div>
+          {editing.payment === "Udhari" && (
+            <div style={{ marginTop: 8 }}>
+              <Field label="Amount paid (mark repayments here)">
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input className="input" style={{ flex: 1 }} type="number" min="0" step="0.01" max={editTotal} value={editing.paid} onChange={(e) => setEditing({ ...editing, paid: e.target.value })} />
+                  <button className="btn small ghost" onClick={() => setEditing({ ...editing, paid: String(editTotal) })}>Mark fully paid</button>
+                </div>
+              </Field>
+              <div style={{ fontSize: 12, textAlign: "right", color: "#C44536", fontWeight: 600 }}>Outstanding: {INR(Math.max(0, money(editTotal - (+editing.paid || 0))))}</div>
+            </div>
+          )}
           <div style={{ fontSize: 11.5, color: "#6B7E74", marginTop: 4 }}>Stock adjusts automatically for any quantity change.</div>
           <button className="btn primary big" style={{ width: "100%", marginTop: 12 }} onClick={saveEdit}>Save changes</button>
         </Modal>
@@ -2892,6 +2932,21 @@ function Stats({ sales, expenses, items }) {
     return { stockCost, stockSell, lowCount, soonQty, soonVal: money(soonVal), expQty, expVal: money(expVal), turnover: totalStock ? Math.round((unitsSold / totalStock) * 100) / 100 : 0, unitsSold: Math.round(unitsSold * 100) / 100, totalStock: Math.round(totalStock * 100) / 100 };
   }, [items, pSales]);
 
+  // Udhari / credit — outstanding by customer across ALL time (a debt isn't period-bound).
+  const udhari = useMemo(() => {
+    const u = sales.filter((s) => s.payment === "Udhari");
+    const byCust = {};
+    u.forEach((s) => {
+      const out = Math.max(0, (s.total || 0) - (s.paid || 0));
+      const name = (s.customer || "").trim() || "(no name)";
+      const c = byCust[name] || (byCust[name] = { name, mobile: "", outstanding: 0, total: 0, bills: 0 });
+      c.outstanding += out; c.total += (s.total || 0); c.bills += 1;
+      if (s.mobile) c.mobile = s.mobile;
+    });
+    const customers = Object.values(byCust).map((c) => ({ ...c, outstanding: money(c.outstanding), total: money(c.total) })).sort((a, b) => b.outstanding - a.outstanding);
+    return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + Math.max(0, (s.total || 0) - (s.paid || 0)), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
+  }, [sales]);
+
   const fmtDate = (d) => new Date(d + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
   const metricLabel = { revenue: "By revenue", qty: "By quantity", profit: "By profit" };
 
@@ -3032,6 +3087,34 @@ function Stats({ sales, expenses, items }) {
           </div>
         </>
       )}
+
+      <div style={sectionHead}>Udhari / credit <span style={{ fontWeight: 500, color: "#8A9C90" }}>(all time)</span></div>
+      <div style={S.cards}>
+        <Card label="Outstanding credit" value={INR(udhari.totalOutstanding)} sub={udhari.withDue.length + " customer(s) owe"} accent />
+        <Card label="Udhari bills" value={udhari.count} sub="total credit bills" />
+        <Card label="Top debtor" value={udhari.withDue[0] ? udhari.withDue[0].name : "—"} sub={udhari.withDue[0] ? INR(udhari.withDue[0].outstanding) : "—"} />
+      </div>
+      <section style={{ ...S.panel, marginBottom: 4 }}>
+        <div style={S.panelHead}>Who owes you <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0, color: "#8A9C90", marginLeft: 8 }}>{udhari.withDue.length}</span></div>
+        {udhari.withDue.length === 0 ? (
+          <Empty text="No outstanding credit — all udhari settled. 🎉" />
+        ) : (
+          <table className="tbl">
+            <thead><tr><th>Customer</th><th>Mobile</th><th style={{ textAlign: "right" }}>Bills</th><th style={{ textAlign: "right" }}>Outstanding</th></tr></thead>
+            <tbody>
+              {udhari.withDue.map((c) => (
+                <tr key={c.name}>
+                  <td style={{ fontWeight: 600 }}>{c.name}</td>
+                  <td style={{ color: "#677" }}>{c.mobile || "—"}</td>
+                  <td style={{ textAlign: "right" }}>{c.bills}</td>
+                  <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(c.outstanding)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Record repayments in Sales History → open the bill → Edit → “Amount paid”.</div>
+      </section>
 
       <div style={sectionHead}>Inventory health <span style={{ fontWeight: 500, color: "#8A9C90" }}>(current)</span></div>
       <div style={S.cards}>
