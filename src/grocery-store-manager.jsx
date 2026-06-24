@@ -102,7 +102,7 @@ function printReceipt(sale) {
     </table>
     ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
     ${sale.customer || sale.mobile ? `<div class="meta">Customer: ${escapeHtml(sale.customer || "—")}${sale.mobile ? " · " + escapeHtml(sale.mobile) : ""}</div>` : ""}
-    ${sale.payment === "Udhari" ? `<div class="meta">Paid now: ${INR(sale.paid || 0)} &nbsp; Balance due: ${INR(Math.max(0, (sale.total || 0) - (sale.paid || 0)))}</div>` : ""}
+    ${sale.payment === "Udhari" ? `<div class="meta">Paid now: ${INR(sale.paid || 0)}${sale.paidMode ? " (" + escapeHtml(sale.paidMode) + ")" : ""} &nbsp; Balance due: ${INR(Math.max(0, (sale.total || 0) - (sale.paid || 0)))}</div>` : ""}
     <div class="ft">Thank you! Please visit again.</div>
     <div class="pay">
       <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
@@ -895,6 +895,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [customer, setCustomer] = useState("");
   const [mobile, setMobile] = useState("");
   const [paidNow, setPaidNow] = useState(""); // Udhari part-payment taken at billing time
+  const [paidMode, setPaidMode] = useState("Cash"); // how that part-payment was received (UPI/Cash)
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
@@ -1026,8 +1027,9 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       // Customer name & mobile are optional on any bill (not just Udhari).
       ...(customer.trim() ? { customer: customer.trim() } : {}),
       ...(mobile.trim() ? { mobile: mobile.trim() } : {}),
-      // For Udhari (credit), record how much was paid now; the rest stays outstanding.
+      // For Udhari (credit), record how much was paid now (and via UPI/Cash); rest stays outstanding.
       ...(pay === "Udhari" ? { paid: Math.min(total, Math.max(0, money(+paidNow || 0))) } : {}),
+      ...(pay === "Udhari" && +paidNow > 0 ? { paidMode } : {}),
     };
     setSales((s) => [...s, sale]);
     setItems((its) => its.map((i) => {
@@ -1041,6 +1043,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     setCustomer("");
     setMobile("");
     setPaidNow("");
+    setPaidMode("Cash");
     searchRef.current?.focus();
     notify(`Bill saved (${pay}) — ` + INR(total));
   };
@@ -1150,9 +1153,17 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
                     <input className="input" style={{ flex: 1 }} type="number" min="0" step="0.01" max={total} placeholder="Paid now (optional)" value={paidNow} onChange={(e) => setPaidNow(e.target.value)} aria-label="Amount paid now" />
                     <button className="btn small ghost" onClick={() => setPaidNow(String(total))}>Full</button>
                   </div>
+                  {+paidNow > 0 && (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6 }}>
+                      <span style={{ fontSize: 11.5, color: "#6B7E74", fontWeight: 600 }}>Paid via</span>
+                      {["UPI", "Cash"].map((m) => (
+                        <button key={m} className={"btn small " + (paidMode === m ? "primary" : "ghost")} onClick={() => setPaidMode(m)}>{m}</button>
+                      ))}
+                    </div>
+                  )}
                   <div style={{ fontSize: 12, textAlign: "right", marginTop: 4, color: "#C44536", fontWeight: 600 }}>
                     On credit (udhari): {INR(Math.max(0, money(total - (+paidNow || 0))))}
-                    {+paidNow > 0 && <span style={{ color: "#1B5E43", fontWeight: 500 }}> · paid {INR(Math.min(total, money(+paidNow)))}</span>}
+                    {+paidNow > 0 && <span style={{ color: "#1B5E43", fontWeight: 500 }}> · paid {INR(Math.min(total, money(+paidNow)))} ({paidMode})</span>}
                   </div>
                 </div>
               )}
@@ -2221,7 +2232,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   };
 
   const openEdit = (s) => setEditing({
-    id: s.id, date: s.date, payment: s.payment || "UPI", paid: s.paid != null ? String(s.paid) : "",
+    id: s.id, date: s.date, payment: s.payment || "UPI", paid: s.paid != null ? String(s.paid) : "", paidMode: s.paidMode || "Cash",
     lines: s.lines.map((l) => ({ ...l })), orig: s.lines.map((l) => ({ ...l })),
   });
   const editLine = (idx, qty) => setEditing((e) => ({ ...e, lines: e.lines.map((l, i) => (i === idx ? { ...l, qty: Math.max(0, qty || 0) } : l)) }));
@@ -2247,7 +2258,10 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     setSales((all) => all.map((x) => {
       if (x.id !== editing.id) return x;
       const next = { ...x, date: editing.date || x.date, payment: editing.payment, lines: newLines, total, profit };
-      if (editing.payment === "Udhari") next.paid = paid; else delete next.paid;
+      if (editing.payment === "Udhari") {
+        next.paid = paid;
+        if (paid > 0) next.paidMode = editing.paidMode; else delete next.paidMode;
+      } else { delete next.paid; delete next.paidMode; }
       return next;
     }));
     log("sale", `Edited bill → ${INR(total)} · ${newLines.length} line(s) · ${editing.payment}`);
@@ -2272,7 +2286,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   };
 
   const openSplit = (s) => setSplitting({
-    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "", mobile: s.mobile || "", paid: s.paid || 0,
+    id: s.id, time: s.time, payment: s.payment || "UPI", customer: s.customer || "", mobile: s.mobile || "", paid: s.paid || 0, paidMode: s.paidMode || "Cash",
     total: s.total, profit: s.profit, lines: s.lines,
     parts: equalShares(s.total, 2).map((amount, i) => ({ date: addDays(s.date, -i), amount })),
     rangeFrom: addDays(s.date, -1), rangeTo: s.date,
@@ -2331,7 +2345,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
 
   const saveSplit = () => {
     if (!splitValid) return;
-    const { id, time, payment, customer, mobile, paid, total, profit, lines } = splitting;
+    const { id, time, payment, customer, mobile, paid, paidMode, total, profit, lines } = splitting;
     // Snap the last part to absorb any sub-paisa residual so the parts sum to EXACTLY total.
     const exceptLast = money(splitting.parts.slice(0, -1).reduce((a, p) => a + (+p.amount || 0), 0));
     const parts = splitting.parts.map((p, i, arr) =>
@@ -2360,6 +2374,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
         lines: sl, total: money(+p.amount), profit: prof,
         payment, ...(customer ? { customer } : {}), ...(mobile ? { mobile } : {}),
         ...(payment === "Udhari" ? { paid: partPaid } : {}),
+        ...(payment === "Udhari" && partPaid > 0 ? { paidMode } : {}),
         splitOf: id,
       };
     });
@@ -2450,6 +2465,14 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
                   <button className="btn small ghost" onClick={() => setEditing({ ...editing, paid: String(editTotal) })}>Mark fully paid</button>
                 </div>
               </Field>
+              {+editing.paid > 0 && (
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: -4, marginBottom: 4 }}>
+                  <span style={{ fontSize: 11.5, color: "#6B7E74", fontWeight: 600 }}>Paid via</span>
+                  {["UPI", "Cash"].map((m) => (
+                    <button key={m} className={"btn small " + (editing.paidMode === m ? "primary" : "ghost")} onClick={() => setEditing({ ...editing, paidMode: m })}>{m}</button>
+                  ))}
+                </div>
+              )}
               <div style={{ fontSize: 12, textAlign: "right", color: "#C44536", fontWeight: 600 }}>Outstanding: {INR(Math.max(0, money(editTotal - (+editing.paid || 0))))}</div>
             </div>
           )}
