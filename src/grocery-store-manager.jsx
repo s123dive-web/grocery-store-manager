@@ -991,8 +991,34 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [miscPrice, setMiscPrice] = useState("");
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
   const [stockQty, setStockQty] = useState("");
+  const [custFocus, setCustFocus] = useState(false); // customer-name field focused → show suggestions
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
+
+  // Unique past customers (name + most-recent non-empty mobile) for the name autocomplete.
+  // Sales are appended oldest→newest, so the last seen mobile per name is the most recent.
+  const knownCustomers = useMemo(() => {
+    const m = new Map();
+    sales.forEach((s) => {
+      const name = (s.customer || "").trim();
+      if (!name) return;
+      const key = name.toLowerCase();
+      const e = m.get(key) || { name, mobile: "" };
+      e.name = name; // keep latest spelling/casing
+      if ((s.mobile || "").trim()) e.mobile = s.mobile.trim();
+      m.set(key, e);
+    });
+    return [...m.values()];
+  }, [sales]);
+
+  // Suggestions for the currently-typed name (substring match, excluding an exact hit).
+  const custSuggestions = useMemo(() => {
+    const q = customer.trim().toLowerCase();
+    if (!q) return [];
+    return knownCustomers
+      .filter((c) => c.name.toLowerCase().includes(q) && c.name.toLowerCase() !== q)
+      .slice(0, 6);
+  }, [customer, knownCustomers]);
 
   // Units sold per item name — used for the best-seller ★ and as a tie-breaker.
   const soldQty = useMemo(() => {
@@ -1235,7 +1261,26 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
                 ))}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
-                <input className="input" placeholder={pay === "Udhari" ? "Customer name (owes)" : "Customer name (optional)"} value={customer} onChange={(e) => setCustomer(e.target.value)} aria-label="Customer name" />
+                <div style={{ position: "relative" }}>
+                  <input className="input" autoComplete="off" placeholder={pay === "Udhari" ? "Customer name (owes)" : "Customer name (optional)"} value={customer}
+                    onChange={(e) => setCustomer(e.target.value)}
+                    onFocus={() => setCustFocus(true)}
+                    onBlur={() => setTimeout(() => setCustFocus(false), 120)}
+                    aria-label="Customer name" />
+                  {custFocus && custSuggestions.length > 0 && (
+                    <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, background: "#fff", border: "1px solid #DDE8DE", borderRadius: 9, marginTop: 2, boxShadow: "0 8px 24px rgba(0,0,0,.14)", overflow: "hidden" }}>
+                      {custSuggestions.map((c) => (
+                        // onMouseDown (not onClick) so selection fires before the input's blur closes the list.
+                        <button key={c.name} type="button"
+                          onMouseDown={(e) => { e.preventDefault(); setCustomer(c.name); if (c.mobile) setMobile(c.mobile); setCustFocus(false); }}
+                          style={{ display: "flex", justifyContent: "space-between", gap: 8, width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: "1px solid #F0F4F0", padding: "8px 10px", cursor: "pointer", fontSize: 13, fontFamily: "inherit" }}>
+                          <span style={{ fontWeight: 600 }}>{c.name}</span>
+                          <span style={{ color: "#8A9C90" }}>{c.mobile || "—"}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <input className="input" type="tel" inputMode="numeric" maxLength={15} placeholder="Mobile (optional)" value={mobile} onChange={(e) => setMobile(e.target.value)} aria-label="Customer mobile" />
               </div>
               {pay === "Udhari" && (
@@ -3296,9 +3341,20 @@ function Stats({ sales, expenses, items }) {
 // Standalone top-level view. Outstanding is tracked across ALL time — a debt isn't
 // period-bound — so this reads the full sales list rather than a date-filtered slice.
 const billOut = (s) => Math.max(0, money((s.total || 0) - (s.paid || 0)));
+// Minutes since midnight from a stored time like "02:15 pm" / "10:05 am (back-dated)"; -1 if unknown.
+const timeToMin = (t) => {
+  const m = String(t || "").match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (!m) return -1;
+  let h = +m[1]; const ap = (m[3] || "").toLowerCase();
+  if (ap) { h = h % 12; if (ap === "pm") h += 12; }
+  return h * 60 + (+m[2]);
+};
+// Newest-first comparator for {date,time} records: date descending, then time descending.
+const byDateTimeDesc = (a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : timeToMin(b.time) - timeToMin(a.time));
 
 function Udhari({ sales, setSales, notify, log }) {
   const [openCust, setOpenCust] = useState(() => new Set()); // expanded customer names
+  const [openBills, setOpenBills] = useState(() => new Set()); // expanded bills (showing order details)
   const [paying, setPaying] = useState(null); // the sale (bill) a repayment is being recorded against
   const [payAmt, setPayAmt] = useState("");
   const [payMode, setPayMode] = useState("Cash");
@@ -3316,8 +3372,8 @@ function Udhari({ sales, setSales, notify, log }) {
     });
     const customers = Object.values(byCust).map((c) => ({
       ...c, outstanding: money(c.outstanding), total: money(c.total),
-      // Oldest bills first — repayments naturally clear the longest-standing debt.
-      billList: [...c.billList].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
+      // Newest bills first (date then time descending).
+      billList: [...c.billList].sort(byDateTimeDesc),
     })).sort((a, b) => b.outstanding - a.outstanding);
     return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + billOut(s), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
   }, [sales]);
@@ -3328,26 +3384,32 @@ function Udhari({ sales, setSales, notify, log }) {
     const events = [];
     sales.filter((s) => s.payment === "Udhari").forEach((s) => {
       const who = (s.customer || "").trim() || "(no name)";
-      events.push({ id: s.id + "-c", date: s.date, kind: "credit", who, amount: money(s.total || 0) });
+      events.push({ id: s.id + "-c", date: s.date, time: s.time || "", kind: "credit", who, amount: money(s.total || 0) });
       const ledger = Array.isArray(s.payments) ? s.payments : [];
       let ledgerSum = 0;
       ledger.forEach((p, i) => {
         const amt = money(p.amount || 0);
         ledgerSum += amt;
-        events.push({ id: `${s.id}-p${p.id || i}`, date: p.date || s.date, kind: "paid", who, amount: amt, mode: p.mode || "—" });
+        events.push({ id: `${s.id}-p${p.id || i}`, date: p.date || s.date, time: p.time || "", kind: "paid", who, amount: amt, mode: p.mode || "—" });
       });
       const rem = money((s.paid || 0) - ledgerSum);
-      if (rem > 0.005) events.push({ id: s.id + "-p0", date: s.date, kind: "paid", who, amount: rem, mode: s.paidMode || "—", atStart: true });
+      if (rem > 0.005) events.push({ id: s.id + "-p0", date: s.date, time: s.time || "", kind: "paid", who, amount: rem, mode: s.paidMode || "—", atStart: true });
     });
-    // Strictly date-descending (newest first). On the same date the repayment (the later
-    // action) sorts above the credit, keeping the whole list consistently most-recent-first.
-    events.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.kind === b.kind ? 0 : a.kind === "paid" ? -1 : 1)));
+    // Strictly newest-first: date descending, then time descending. On an exact tie the
+    // repayment (the later action) sorts above the credit.
+    events.sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      const tm = timeToMin(b.time) - timeToMin(a.time);
+      if (tm) return tm;
+      return a.kind === b.kind ? 0 : a.kind === "paid" ? -1 : 1;
+    });
     const totalCredit = money(events.filter((e) => e.kind === "credit").reduce((a, e) => a + e.amount, 0));
     const totalPaid = money(events.filter((e) => e.kind === "paid").reduce((a, e) => a + e.amount, 0));
     return { events, totalCredit, totalPaid };
   }, [sales]);
 
   const toggle = (name) => setOpenCust((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; });
+  const toggleBill = (id) => setOpenBills((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   const openPay = (sale) => { setPaying(sale); setPayAmt(String(billOut(sale))); setPayMode(sale.paidMode || "Cash"); };
 
@@ -3365,9 +3427,10 @@ function Udhari({ sales, setSales, notify, log }) {
     const rem = money((payingLive.total || 0) - newPaid);
     // Single setSales → Sales History, dashboard and cloud sync all pick up the new paid/outstanding.
     // Also append a dated entry to the payments ledger so the History panel can show when it was paid.
+    const nowTime = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
     setSales((all) => all.map((x) => {
       if (x.id !== payingLive.id) return x;
-      const payments = [...(x.payments || []), { id: uid(), date: todayStr(), amount: payAmtNum, mode: payMode }];
+      const payments = [...(x.payments || []), { id: uid(), date: todayStr(), time: nowTime, amount: payAmtNum, mode: payMode }];
       return { ...x, paid: newPaid, paidMode: payMode, payments };
     }));
     const who = (payingLive.customer || "").trim() || "(no name)";
@@ -3411,18 +3474,44 @@ function Udhari({ sales, setSales, notify, log }) {
                         </button>
                       </td>
                     </tr>
-                    {isOpen && dueBills.map((b) => (
-                      <tr key={b.id} style={{ background: "#FAFBF8" }}>
-                        <td></td>
-                        <td colSpan={3} style={{ fontSize: 12.5, color: "#566" }}>
-                          {b.date} · bill {INR(b.total)}{(b.paid || 0) > 0 ? ` · paid ${INR(b.paid)}${b.paidMode ? " (" + b.paidMode + ")" : ""}` : ""}
-                        </td>
-                        <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(billOut(b))}</td>
-                        <td style={{ textAlign: "right" }}>
-                          <button className="btn small" onClick={(e) => { e.stopPropagation(); openPay(b); }}>Pay</button>
-                        </td>
-                      </tr>
-                    ))}
+                    {isOpen && dueBills.map((b) => {
+                      const billOpen = openBills.has(b.id);
+                      const nLines = (b.lines || []).length;
+                      return (
+                        <Fragment key={b.id}>
+                          <tr onClick={() => toggleBill(b.id)} style={{ background: "#FAFBF8", cursor: "pointer" }}>
+                            <td></td>
+                            <td colSpan={3} style={{ fontSize: 12.5, color: "#566" }}>
+                              <span style={{ color: "#8A9C90", marginRight: 4 }}>{billOpen ? "▾" : "▸"}</span>
+                              {b.date}{b.time ? " · " + b.time : ""} · {nLines} item{nLines === 1 ? "" : "s"} · bill {INR(b.total)}{(b.paid || 0) > 0 ? ` · paid ${INR(b.paid)}${b.paidMode ? " (" + b.paidMode + ")" : ""}` : ""}
+                            </td>
+                            <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(billOut(b))}</td>
+                            <td style={{ textAlign: "right" }}>
+                              <button className="btn small" onClick={(e) => { e.stopPropagation(); openPay(b); }}>Pay</button>
+                            </td>
+                          </tr>
+                          {billOpen && (
+                            <tr style={{ background: "#FAFBF8" }}>
+                              <td></td>
+                              <td colSpan={5} style={{ paddingTop: 0 }}>
+                                <div style={{ background: "#fff", border: "1px solid #EEF3EE", borderRadius: 8, padding: "8px 12px" }}>
+                                  {nLines === 0 ? (
+                                    <div style={{ fontSize: 12.5, color: "#8A9C90" }}>No line items on this bill.</div>
+                                  ) : (b.lines).map((l, i) => (
+                                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
+                                      <span>{l.name} × {l.qty}</span><span>{INR(l.amount)}</span>
+                                    </div>
+                                  ))}
+                                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, borderTop: "1px dashed #DDE8DE", marginTop: 4, paddingTop: 4 }}>
+                                    <span>Total</span><span>{INR(b.total)}</span>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </Fragment>
                 );
               })}
@@ -3444,11 +3533,11 @@ function Udhari({ sales, setSales, notify, log }) {
           <Empty text="No udhari/credit activity yet." />
         ) : (
           <table className="tbl">
-            <thead><tr><th>Date</th><th>Customer</th><th>Type</th><th style={{ textAlign: "right" }}>Amount</th><th>Mode</th></tr></thead>
+            <thead><tr><th>Date &amp; time</th><th>Customer</th><th>Type</th><th style={{ textAlign: "right" }}>Amount</th><th>Mode</th></tr></thead>
             <tbody>
               {history.events.slice(0, 150).map((e) => (
                 <tr key={e.id}>
-                  <td style={{ whiteSpace: "nowrap", color: "#677" }}>{e.date}</td>
+                  <td style={{ whiteSpace: "nowrap", color: "#677" }}>{e.date}{e.time ? <span style={{ color: "#9AA" }}> {e.time}</span> : null}</td>
                   <td style={{ fontWeight: 600 }}>{e.who}</td>
                   <td>
                     {e.kind === "credit"
