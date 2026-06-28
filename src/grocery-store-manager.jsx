@@ -520,7 +520,6 @@ const TOP_TABS = [
   ["sales", "⊟", "Sales History"],
   ["finance", "∑", "Finance"],
   ["expense", "⊝", "Add Expense"],
-  ["logs", "❑", "Activity Log"],
 ];
 const OTHER_TABS = [
   ["stats", "📊", "Stats"],
@@ -528,6 +527,7 @@ const OTHER_TABS = [
   ["vendorbills", "🧾", "Vendor Bills"],
   ["raw", "⇪", "Data Import"],
   ["barcode", "▥", "Barcode Creator"],
+  ["logs", "❑", "Activity Log"],
   ["admin", "⚙", "Admin"],
 ];
 
