@@ -129,6 +129,56 @@ const CATEGORY_ICONS = {
 };
 const iconFor = (category) => CATEGORY_ICONS[category] || "📦";
 
+// An icon is "auto" (safe to swap when the category changes) when it's blank or still equals
+// the category's default emoji. A hand-typed custom emoji differs from the default → preserved.
+const isAutoIcon = (icon, category) => {
+  const t = (icon || "").trim();
+  return !t || t === iconFor(category);
+};
+
+// Keyword → category guesses for the Add-item form. Ordered: more specific entries first so the
+// right one wins (e.g. "ice cream" before generic terms, "dairy milk" before "milk", "chilli
+// powder" before "chilli"). Single-word keys match on word boundaries; multi-word / punctuated
+// keys match as substrings.
+const CATEGORY_KEYWORDS = [
+  ["ice cream", "Ice Cream"], ["kulfi", "Ice Cream"], ["cornetto", "Ice Cream"], ["cassata", "Ice Cream"], ["rajbhog", "Ice Cream"], ["havmor", "Ice Cream"],
+  ["dairy milk", "Chocolates & Candy"], ["chocolate", "Chocolates & Candy"], ["kitkat", "Chocolates & Candy"], ["kit kat", "Chocolates & Candy"], ["5 star", "Chocolates & Candy"], ["munch", "Chocolates & Candy"], ["gems", "Chocolates & Candy"], ["perk", "Chocolates & Candy"], ["candy", "Chocolates & Candy"], ["lollipop", "Chocolates & Candy"], ["ferrero", "Chocolates & Candy"], ["kinder", "Chocolates & Candy"], ["toffee", "Chocolates & Candy"], ["eclair", "Chocolates & Candy"], ["alpenliebe", "Chocolates & Candy"], ["pulse", "Chocolates & Candy"],
+  ["bread", "Bakery & Bread"], ["pav", "Bakery & Bread"], ["khari", "Bakery & Bread"], ["rusk", "Bakery & Bread"], ["bun", "Bakery & Bread"], ["toast", "Bakery & Bread"], ["bakery", "Bakery & Bread"], ["cake", "Bakery & Bread"], ["cream roll", "Bakery & Bread"],
+  ["chilli powder", "Spices & Masala"], ["garam masala", "Spices & Masala"], ["masala", "Spices & Masala"], ["haldi", "Spices & Masala"], ["turmeric", "Spices & Masala"], ["jeera", "Spices & Masala"], ["cumin", "Spices & Masala"], ["dhania", "Spices & Masala"], ["spice", "Spices & Masala"], ["hing", "Spices & Masala"], ["pepper", "Spices & Masala"], ["sambar", "Spices & Masala"],
+  ["ghee", "Oil & Ghee"], ["oil", "Oil & Ghee"],
+  ["tea", "Beverages"], ["coffee", "Beverages"], ["nescafe", "Beverages"], ["bru", "Beverages"], ["bournvita", "Beverages"], ["horlicks", "Beverages"], ["boost", "Beverages"],
+  ["water", "Cold Drinks & Water"], ["bisleri", "Cold Drinks & Water"], ["kinley", "Cold Drinks & Water"], ["cola", "Cold Drinks & Water"], ["coke", "Cold Drinks & Water"], ["pepsi", "Cold Drinks & Water"], ["thums", "Cold Drinks & Water"], ["sprite", "Cold Drinks & Water"], ["fanta", "Cold Drinks & Water"], ["maaza", "Cold Drinks & Water"], ["frooti", "Cold Drinks & Water"], ["juice", "Cold Drinks & Water"], ["sting", "Cold Drinks & Water"], ["red bull", "Cold Drinks & Water"], ["soda", "Cold Drinks & Water"], ["buttermilk", "Cold Drinks & Water"], ["lassi", "Cold Drinks & Water"],
+  ["milk", "Dairy & Eggs"], ["dahi", "Dairy & Eggs"], ["curd", "Dairy & Eggs"], ["paneer", "Dairy & Eggs"], ["cheese", "Dairy & Eggs"], ["butter", "Dairy & Eggs"], ["egg", "Dairy & Eggs"], ["yogurt", "Dairy & Eggs"],
+  ["biscuit", "Snacks & Biscuits"], ["parle", "Snacks & Biscuits"], ["oreo", "Snacks & Biscuits"], ["monaco", "Snacks & Biscuits"], ["chips", "Snacks & Biscuits"], ["lays", "Snacks & Biscuits"], ["lay's", "Snacks & Biscuits"], ["kurkure", "Snacks & Biscuits"], ["bingo", "Snacks & Biscuits"], ["pringles", "Snacks & Biscuits"], ["bhujia", "Snacks & Biscuits"], ["sev", "Snacks & Biscuits"], ["namkeen", "Snacks & Biscuits"], ["wafers", "Snacks & Biscuits"], ["bakarwadi", "Snacks & Biscuits"], ["chakli", "Snacks & Biscuits"], ["mixture", "Snacks & Biscuits"], ["snack", "Snacks & Biscuits"], ["cookies", "Snacks & Biscuits"],
+  ["atta", "Staples & Grains"], ["rice", "Staples & Grains"], ["dal", "Staples & Grains"], ["sugar", "Staples & Grains"], ["salt", "Staples & Grains"], ["poha", "Staples & Grains"], ["rava", "Staples & Grains"], ["sooji", "Staples & Grains"], ["besan", "Staples & Grains"], ["maida", "Staples & Grains"], ["flour", "Staples & Grains"], ["basmati", "Staples & Grains"], ["wheat", "Staples & Grains"], ["chana", "Staples & Grains"], ["rajma", "Staples & Grains"], ["moong", "Staples & Grains"], ["urad", "Staples & Grains"], ["masoor", "Staples & Grains"], ["toor", "Staples & Grains"], ["sabudana", "Staples & Grains"], ["jaggery", "Staples & Grains"], ["vermicelli", "Staples & Grains"], ["daliya", "Staples & Grains"], ["jowar", "Staples & Grains"], ["bajra", "Staples & Grains"], ["ragi", "Staples & Grains"],
+  ["almond", "Dry Fruits & Nuts"], ["cashew", "Dry Fruits & Nuts"], ["kaju", "Dry Fruits & Nuts"], ["badam", "Dry Fruits & Nuts"], ["raisin", "Dry Fruits & Nuts"], ["kishmish", "Dry Fruits & Nuts"], ["walnut", "Dry Fruits & Nuts"], ["pista", "Dry Fruits & Nuts"], ["dates", "Dry Fruits & Nuts"], ["khajur", "Dry Fruits & Nuts"], ["anjeer", "Dry Fruits & Nuts"],
+  ["onion", "Fruits & Vegetables"], ["potato", "Fruits & Vegetables"], ["tomato", "Fruits & Vegetables"], ["banana", "Fruits & Vegetables"], ["lemon", "Fruits & Vegetables"], ["chilli", "Fruits & Vegetables"], ["ginger", "Fruits & Vegetables"], ["garlic", "Fruits & Vegetables"], ["coriander", "Fruits & Vegetables"], ["apple", "Fruits & Vegetables"], ["mango", "Fruits & Vegetables"], ["vegetable", "Fruits & Vegetables"], ["fruit", "Fruits & Vegetables"], ["palak", "Fruits & Vegetables"], ["spinach", "Fruits & Vegetables"],
+  ["maggi", "Frozen & Instant"], ["noodles", "Frozen & Instant"], ["yippee", "Frozen & Instant"], ["pasta", "Frozen & Instant"], ["momos", "Frozen & Instant"], ["fries", "Frozen & Instant"], ["frozen", "Frozen & Instant"], ["batter", "Frozen & Instant"], ["instant", "Frozen & Instant"],
+  ["soap", "Personal Care"], ["shampoo", "Personal Care"], ["toothpaste", "Personal Care"], ["colgate", "Personal Care"], ["toothbrush", "Personal Care"], ["deo", "Personal Care"], ["perfume", "Personal Care"], ["razor", "Personal Care"], ["shaving", "Personal Care"], ["handwash", "Personal Care"], ["sanitary", "Personal Care"], ["stayfree", "Personal Care"], ["whisper", "Personal Care"], ["nivea", "Personal Care"], ["vaseline", "Personal Care"], ["facewash", "Personal Care"], ["lotion", "Personal Care"], ["sanitizer", "Personal Care"], ["dettol", "Personal Care"],
+  ["detergent", "Household & Cleaning"], ["surf", "Household & Cleaning"], ["tide", "Household & Cleaning"], ["ariel", "Household & Cleaning"], ["ghadi", "Household & Cleaning"], ["harpic", "Household & Cleaning"], ["lizol", "Household & Cleaning"], ["phenyl", "Household & Cleaning"], ["broom", "Household & Cleaning"], ["jhadu", "Household & Cleaning"], ["zadu", "Household & Cleaning"], ["scrub", "Household & Cleaning"], ["garbage", "Household & Cleaning"], ["tissue", "Household & Cleaning"], ["foil", "Household & Cleaning"], ["cleaner", "Household & Cleaning"], ["agarbatti", "Household & Cleaning"], ["mosquito", "Household & Cleaning"], ["good knight", "Household & Cleaning"], ["matchbox", "Household & Cleaning"], ["fabric conditioner", "Household & Cleaning"],
+  ["pencil", "Stationery"], ["notebook", "Stationery"], ["eraser", "Stationery"], ["sharpener", "Stationery"], ["marker", "Stationery"], ["glue", "Stationery"], ["stationery", "Stationery"], ["stapler", "Stationery"], ["envelope", "Stationery"], ["ball pen", "Stationery"], ["a4 paper", "Stationery"],
+  ["cricket", "Sports & Toys"], ["football", "Sports & Toys"], ["carrom", "Sports & Toys"], ["badminton", "Sports & Toys"], ["supporter", "Sports & Toys"],
+];
+
+// Guess a category from a typed item name: keyword map first, then a shared-token match against
+// the store's existing items. Returns null when nothing is confident enough (caller keeps the
+// current default). Used only for NEW items in the Add form.
+function guessCategory(name, items = []) {
+  const n = (name || "").toLowerCase().trim();
+  if (n.length < 2) return null;
+  for (const [kw, cat] of CATEGORY_KEYWORDS) {
+    const hit = /[^a-z0-9]/.test(kw) ? n.includes(kw) : new RegExp(`\\b${kw}\\b`).test(n);
+    if (hit) return cat;
+  }
+  // Fallback: an existing item that shares a 4+ char word with the typed name.
+  const tokens = n.split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+  if (tokens.length) {
+    const hit = items.find((i) => { const itn = (i.name || "").toLowerCase(); return tokens.some((t) => itn.includes(t)); });
+    if (hit) return hit.category || null;
+  }
+  return null;
+}
+
 // Catalog tuned for a Pashan–Baner (Pune) society convenience store:
 // top-up shoppers, kids' favourites, always-moving chilled stock.
 const SEED_ITEMS = [
@@ -1482,7 +1532,7 @@ function Inventory({ items, setItems, notify, log }) {
         </div>
       </td>
       <td onClick={stop}>
-        <select className="input" style={{ padding: "6px 4px" }} value={d.category} onChange={(e) => sf("category", e.target.value)} aria-label="Category">
+        <select className="input" style={{ padding: "6px 4px" }} value={d.category} onChange={(e) => { const c = e.target.value; sf("category", c); if (isAutoIcon(d.icon, d.category)) sf("icon", iconFor(c)); }} aria-label="Category">
           {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
         </select>
       </td>
@@ -1549,7 +1599,7 @@ function Inventory({ items, setItems, notify, log }) {
                   {quickEdit && drafts[i.id] ? (
                     renderEditRow(i, drafts[i.id], (k, v) => setDraft(i.id, k, v), <td />)
                   ) : rowEdit?.id === i.id ? (
-                    renderEditRow(i, rowEdit, (k, v) => setRowEdit({ ...rowEdit, [k]: v }), (
+                    renderEditRow(i, rowEdit, (k, v) => setRowEdit((e) => ({ ...e, [k]: v })), (
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }} onClick={stop}>
                         <button className="btn small primary" aria-label="Save item" onClick={saveRowEdit}>✓</button>{" "}
                         <button className="btn small ghost" aria-label="Cancel edit" onClick={() => setRowEdit(null)}>✕</button>
@@ -1645,11 +1695,21 @@ function Inventory({ items, setItems, notify, log }) {
 
       {form && (
         <Modal title={form.id ? "Edit item" : "Add new item"} onClose={() => setForm(null)}>
-          <Field label="Item name"><input className="input" autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Amul Butter 100g" /></Field>
+          <Field label="Item name"><input className="input" autoFocus value={form.name} onChange={(e) => {
+            const name = e.target.value;
+            setForm((f) => {
+              // For a NEW item, auto-pick the category from the name until the user picks one
+              // manually; carry the icon along if it's still auto.
+              if (f.id || f.categoryTouched) return { ...f, name };
+              const g = guessCategory(name, items);
+              if (!g || g === f.category) return { ...f, name };
+              return { ...f, name, category: g, icon: isAutoIcon(f.icon, f.category) ? iconFor(g) : f.icon };
+            });
+          }} placeholder="e.g. Amul Butter 100g" /></Field>
           <Field label="Barcode / code (optional)"><input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Scan or type a barcode" /></Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Field label="Category">
-              <select className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+              <select className="input" value={form.category} onChange={(e) => { const c = e.target.value; setForm((f) => ({ ...f, category: c, categoryTouched: true, icon: isAutoIcon(f.icon, f.category) ? iconFor(c) : f.icon })); }}>
                 {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
               </select>
             </Field>
