@@ -889,6 +889,11 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
   const monthSales = sales.filter((s) => s.date.startsWith(month));
   const monthRev = money(monthSales.reduce((a, s) => a + s.total, 0));
   const monthProfit = money(monthSales.reduce((a, s) => a + s.profit, 0));
+  // Sales/revenue above are amounts BOOKED (they include Udhari/credit bills at full value).
+  // These are the still-unpaid (on-credit) portions, shown as a sub-note so the gap is visible.
+  const udhariOf = (list) => money(list.reduce((a, s) => a + (s.payment === "Udhari" ? Math.max(0, (s.total || 0) - (s.paid || 0)) : 0), 0));
+  const dayUdhari = udhariOf(daySales);
+  const monthUdhari = udhariOf(monthSales);
   const monthName = new Date(date + "T00:00").toLocaleDateString("en-IN", { month: "long" });
   const niceDate = new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const trend = useMemo(() => {
@@ -905,9 +910,9 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
         </label>
       </Header>
       <div style={S.cards}>
-        <Card label={isToday ? "Today's sales" : "Sales (this day)"} value={INR(rev)} sub={daySales.length + " bills"} />
+        <Card label={isToday ? "Today's sales" : "Sales (this day)"} value={INR(rev)} sub={daySales.length + " bills" + (dayUdhari > 0 ? ` · ${INR(dayUdhari)} on udhari` : "")} />
         <Card label={isToday ? "Today's profit" : "Profit (this day)"} value={INR(profit)} sub="after item cost" accent />
-        <Card label={monthName + " revenue"} value={INR(monthRev)} sub="month to date" />
+        <Card label={monthName + " revenue"} value={INR(monthRev)} sub={"month to date" + (monthUdhari > 0 ? ` · ${INR(monthUdhari)} on udhari` : "")} />
         <Card label={monthName + " profit"} value={INR(monthProfit)} sub="month to date · after item cost" accent />
         <Card label="Stock value" value={INR(stockValue)} sub={items.length + " items (at cost)"} />
       </div>
