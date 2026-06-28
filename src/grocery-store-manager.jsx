@@ -2288,9 +2288,11 @@ const PAY_COLORS = { UPI: "#2A6FB0", Cash: "#1B5E43", Udhari: "#C44536" };
 
 function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   const [open, setOpen] = useState(null);
+  const [openDates, setOpenDates] = useState(() => new Set()); // expanded past dates (today is always open)
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [editing, setEditing] = useState(null); // { id, date, payment, lines:[...], orig:[...] }
+  const toggleDate = (d) => setOpenDates((s) => { const n = new Set(s); n.has(d) ? n.delete(d) : n.add(d); return n; });
 
   const visible = sales.filter((s) => (!from || s.date >= from) && (!to || s.date <= to));
   const byDate = useMemo(() => {
@@ -2485,13 +2487,24 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
 
       {sales.length === 0 && <section style={S.panel}><Empty text="No sales yet. Bills will appear here after you complete a sale." /></section>}
       {sales.length > 0 && visible.length === 0 && <section style={S.panel}><Empty text="No bills in this date range." /></section>}
-      {byDate.map(([date, list]) => (
+      {byDate.map(([date, list]) => {
+        const isToday = date === todayStr();
+        // Today is always open; every other date collapses (closed by default) so the list scans quickly.
+        const expanded = isToday || openDates.has(date);
+        return (
         <section key={date} style={{ ...S.panel, marginBottom: 14 }}>
-          <div style={S.panelHead}>
+          <div
+            style={{ ...S.panelHead, ...(isToday ? {} : { cursor: "pointer" }) }}
+            onClick={isToday ? undefined : () => toggleDate(date)}
+            {...(isToday ? {} : { role: "button", "aria-expanded": expanded })}
+          >
+            {!isToday && <span style={{ color: "#8A9C90", marginRight: 6 }}>{expanded ? "▾" : "▸"}</span>}
             {new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
+            {isToday && <span style={{ fontWeight: 600, color: "#1B5E43", marginLeft: 8 }}>· Today</span>}
+            <span style={{ fontWeight: 500, color: "#8A9C90", marginLeft: 8 }}>· {list.length} bill{list.length > 1 ? "s" : ""}</span>
             <span style={{ marginLeft: "auto", fontWeight: 800 }}>{INR(list.reduce((a, s) => a + s.total, 0))}</span>
           </div>
-          {list.map((s) => (
+          {expanded && list.map((s) => (
             <div key={s.id}>
               <div style={{ ...S.row, cursor: "pointer" }} onClick={() => setOpen(open === s.id ? null : s.id)}>
                 <span>
@@ -2520,7 +2533,8 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
             </div>
           ))}
         </section>
-      ))}
+        );
+      })}
 
       {editing && (
         <Modal title="Edit bill" onClose={() => setEditing(null)}>
