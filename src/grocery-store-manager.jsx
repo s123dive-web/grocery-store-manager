@@ -519,6 +519,7 @@ const TOP_TABS = [
   ["inventory", "▦", "Inventory"],
   ["sales", "⊟", "Sales History"],
   ["finance", "∑", "Finance"],
+  ["udhari", "💳", "Udhari (Credit)"],
   ["expense", "⊝", "Add Expense"],
 ];
 const OTHER_TABS = [
@@ -806,6 +807,8 @@ function StoreManager({ user, onLogout }) {
           <Finance sales={sales} expenses={expenses} />
         ) : tab === "stats" ? (
           <Stats sales={sales} expenses={expenses} items={items} />
+        ) : tab === "udhari" ? (
+          <Udhari sales={sales} />
         ) : tab === "expense" ? (
           <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "vendorbills" ? (
@@ -2981,21 +2984,6 @@ function Stats({ sales, expenses, items }) {
     return { stockCost, stockSell, lowCount, soonQty, soonVal: money(soonVal), expQty, expVal: money(expVal), turnover: totalStock ? Math.round((unitsSold / totalStock) * 100) / 100 : 0, unitsSold: Math.round(unitsSold * 100) / 100, totalStock: Math.round(totalStock * 100) / 100 };
   }, [items, pSales]);
 
-  // Udhari / credit — outstanding by customer across ALL time (a debt isn't period-bound).
-  const udhari = useMemo(() => {
-    const u = sales.filter((s) => s.payment === "Udhari");
-    const byCust = {};
-    u.forEach((s) => {
-      const out = Math.max(0, (s.total || 0) - (s.paid || 0));
-      const name = (s.customer || "").trim() || "(no name)";
-      const c = byCust[name] || (byCust[name] = { name, mobile: "", outstanding: 0, total: 0, bills: 0 });
-      c.outstanding += out; c.total += (s.total || 0); c.bills += 1;
-      if (s.mobile) c.mobile = s.mobile;
-    });
-    const customers = Object.values(byCust).map((c) => ({ ...c, outstanding: money(c.outstanding), total: money(c.total) })).sort((a, b) => b.outstanding - a.outstanding);
-    return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + Math.max(0, (s.total || 0) - (s.paid || 0)), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
-  }, [sales]);
-
   const fmtDate = (d) => new Date(d + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
   const metricLabel = { revenue: "By revenue", qty: "By quantity", profit: "By profit" };
 
@@ -3137,7 +3125,41 @@ function Stats({ sales, expenses, items }) {
         </>
       )}
 
-      <div style={sectionHead}>Udhari / credit <span style={{ fontWeight: 500, color: "#8A9C90" }}>(all time)</span></div>
+      <div style={sectionHead}>Inventory health <span style={{ fontWeight: 500, color: "#8A9C90" }}>(current)</span></div>
+      <div style={S.cards}>
+        <Card label="Stock value (cost)" value={INR(inv.stockCost)} sub={items.length + " items"} />
+        <Card label="Stock value (sell)" value={INR(inv.stockSell)} sub="potential revenue" />
+        <Card label="Low stock" value={inv.lowCount} sub="at or below alert level" />
+        <Card label="Expiry risk" value={INR(inv.soonVal)} sub={`${inv.soonQty} unit(s) ≤30d` + (inv.expVal > 0 ? ` · ${INR(inv.expVal)} expired` : "")} />
+      </div>
+      <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>
+        Stock turnover this period: <b>{inv.turnover}×</b> ({inv.unitsSold} unit(s) sold vs {inv.totalStock} in stock now). Higher means stock moves faster.
+      </div>
+    </div>
+  );
+}
+
+// ---------- Udhari / Credit (outstanding by customer) ----------
+// Standalone top-level view. Outstanding is tracked across ALL time — a debt isn't
+// period-bound — so this reads the full sales list rather than a date-filtered slice.
+function Udhari({ sales }) {
+  const udhari = useMemo(() => {
+    const u = sales.filter((s) => s.payment === "Udhari");
+    const byCust = {};
+    u.forEach((s) => {
+      const out = Math.max(0, (s.total || 0) - (s.paid || 0));
+      const name = (s.customer || "").trim() || "(no name)";
+      const c = byCust[name] || (byCust[name] = { name, mobile: "", outstanding: 0, total: 0, bills: 0 });
+      c.outstanding += out; c.total += (s.total || 0); c.bills += 1;
+      if (s.mobile) c.mobile = s.mobile;
+    });
+    const customers = Object.values(byCust).map((c) => ({ ...c, outstanding: money(c.outstanding), total: money(c.total) })).sort((a, b) => b.outstanding - a.outstanding);
+    return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + Math.max(0, (s.total || 0) - (s.paid || 0)), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
+  }, [sales]);
+
+  return (
+    <div>
+      <Header title="Udhari / Credit" sub="Outstanding credit by customer, across all time." />
       <div style={S.cards}>
         <Card label="Outstanding credit" value={INR(udhari.totalOutstanding)} sub={udhari.withDue.length + " customer(s) owe"} accent />
         <Card label="Udhari bills" value={udhari.count} sub="total credit bills" />
@@ -3164,17 +3186,6 @@ function Stats({ sales, expenses, items }) {
         )}
         <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Record repayments in Sales History → open the bill → Edit → “Amount paid”.</div>
       </section>
-
-      <div style={sectionHead}>Inventory health <span style={{ fontWeight: 500, color: "#8A9C90" }}>(current)</span></div>
-      <div style={S.cards}>
-        <Card label="Stock value (cost)" value={INR(inv.stockCost)} sub={items.length + " items"} />
-        <Card label="Stock value (sell)" value={INR(inv.stockSell)} sub="potential revenue" />
-        <Card label="Low stock" value={inv.lowCount} sub="at or below alert level" />
-        <Card label="Expiry risk" value={INR(inv.soonVal)} sub={`${inv.soonQty} unit(s) ≤30d` + (inv.expVal > 0 ? ` · ${INR(inv.expVal)} expired` : "")} />
-      </div>
-      <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>
-        Stock turnover this period: <b>{inv.turnover}×</b> ({inv.unitsSold} unit(s) sold vs {inv.totalStock} in stock now). Higher means stock moves faster.
-      </div>
     </div>
   );
 }
