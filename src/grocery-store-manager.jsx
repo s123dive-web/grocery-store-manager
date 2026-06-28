@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback, Fragment } from "react";
 import {
-  ResponsiveContainer, AreaChart, Area, BarChart, Bar,
+  ResponsiveContainer, AreaChart, Area, BarChart, Bar, LineChart, Line,
   XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
 } from "recharts";
 import JsBarcode from "jsbarcode";
@@ -930,6 +930,12 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
       <div style={{ marginTop: 16 }}>
         <ChartCard title={`Payments in ${monthName} — Total vs Cash vs UPI`} height={200}>
           {renderPayMix(monthSales)}
+        </ChartCard>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Total vs Cash vs UPI — last 14 days" height={200}>
+          {renderPayTrend(trend)}
         </ChartCard>
       </div>
 
@@ -2812,11 +2818,11 @@ function buildSeries(sales, expenses, from, to) {
     ? new Date(k + "-01T00:00").toLocaleDateString("en-IN", { month: "short", year: "2-digit" })
     : new Date(k + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }));
   const buckets = new Map();
-  if (monthly) { let d = new Date(start.getFullYear(), start.getMonth(), 1); while (d <= end) { const k = dateStr(d).slice(0, 7); buckets.set(k, { key: k, label: labelOf(k), revenue: 0, profit: 0, expenses: 0 }); d = new Date(d.getFullYear(), d.getMonth() + 1, 1); } }
-  else { const d = new Date(start); while (d <= end) { const k = dateStr(d); buckets.set(k, { key: k, label: labelOf(k), revenue: 0, profit: 0, expenses: 0 }); d.setDate(d.getDate() + 1); } }
-  sales.forEach((s) => { const b = buckets.get(keyOf(s.date)); if (b) { b.revenue += s.total; b.profit += s.profit; } });
+  if (monthly) { let d = new Date(start.getFullYear(), start.getMonth(), 1); while (d <= end) { const k = dateStr(d).slice(0, 7); buckets.set(k, { key: k, label: labelOf(k), revenue: 0, profit: 0, expenses: 0, cash: 0, upi: 0 }); d = new Date(d.getFullYear(), d.getMonth() + 1, 1); } }
+  else { const d = new Date(start); while (d <= end) { const k = dateStr(d); buckets.set(k, { key: k, label: labelOf(k), revenue: 0, profit: 0, expenses: 0, cash: 0, upi: 0 }); d.setDate(d.getDate() + 1); } }
+  sales.forEach((s) => { const b = buckets.get(keyOf(s.date)); if (b) { b.revenue += s.total; b.profit += s.profit; if (s.payment === "Cash") b.cash += s.total; else if (s.payment === "UPI") b.upi += s.total; } });
   expenses.forEach((e) => { const b = buckets.get(keyOf(e.date)); if (b) b.expenses += e.amount; });
-  return [...buckets.values()].map((b) => ({ ...b, revenue: money(b.revenue), profit: money(b.profit), expenses: money(b.expenses) }));
+  return [...buckets.values()].map((b) => ({ ...b, revenue: money(b.revenue), profit: money(b.profit), expenses: money(b.expenses), cash: money(b.cash), upi: money(b.upi) }));
 }
 
 const ChartCard = ({ title, children, height = 240 }) => (
@@ -2861,6 +2867,20 @@ const renderPayMix = (sales) => {
     </BarChart>
   );
 };
+// Trend lines for Total / Cash / UPI over a buildSeries() result. Returns a LineChart element
+// so it can be ChartCard's direct child (ResponsiveContainer clones it for sizing).
+const renderPayTrend = (series) => (
+  <LineChart data={series} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+    <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+    <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={20} />
+    <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+    <Tooltip formatter={(v) => INR(v)} />
+    <Legend wrapperStyle={{ fontSize: 12 }} />
+    <Line type="monotone" dataKey="revenue" name="Total" stroke="#10331F" strokeWidth={2} dot={false} />
+    <Line type="monotone" dataKey="cash" name="Cash" stroke="#1B5E43" strokeWidth={2} dot={false} />
+    <Line type="monotone" dataKey="upi" name="UPI" stroke="#2A6FB0" strokeWidth={2} dot={false} />
+  </LineChart>
+);
 
 // ---------- Finance (analytics) ----------
 const PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisYear", "This year"], ["custom", "Custom"]];
@@ -2916,6 +2936,12 @@ function Finance({ sales, expenses }) {
       <div style={{ marginTop: 16 }}>
         <ChartCard title="Total vs Cash vs UPI" height={220}>
           {renderPayMix(pSales)}
+        </ChartCard>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Total vs Cash vs UPI — trend" height={240}>
+          {renderPayTrend(series)}
         </ChartCard>
       </div>
 
