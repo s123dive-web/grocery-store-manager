@@ -808,7 +808,7 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "stats" ? (
           <Stats sales={sales} expenses={expenses} items={items} />
         ) : tab === "udhari" ? (
-          <Udhari sales={sales} />
+          <Udhari sales={sales} setSales={setSales} notify={notify} log={addLog} />
         ) : tab === "expense" ? (
           <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "vendorbills" ? (
@@ -3142,20 +3142,56 @@ function Stats({ sales, expenses, items }) {
 // ---------- Udhari / Credit (outstanding by customer) ----------
 // Standalone top-level view. Outstanding is tracked across ALL time — a debt isn't
 // period-bound — so this reads the full sales list rather than a date-filtered slice.
-function Udhari({ sales }) {
+const billOut = (s) => Math.max(0, money((s.total || 0) - (s.paid || 0)));
+
+function Udhari({ sales, setSales, notify, log }) {
+  const [openCust, setOpenCust] = useState(() => new Set()); // expanded customer names
+  const [paying, setPaying] = useState(null); // the sale (bill) a repayment is being recorded against
+  const [payAmt, setPayAmt] = useState("");
+  const [payMode, setPayMode] = useState("Cash");
+
   const udhari = useMemo(() => {
     const u = sales.filter((s) => s.payment === "Udhari");
     const byCust = {};
     u.forEach((s) => {
-      const out = Math.max(0, (s.total || 0) - (s.paid || 0));
+      const out = billOut(s);
       const name = (s.customer || "").trim() || "(no name)";
-      const c = byCust[name] || (byCust[name] = { name, mobile: "", outstanding: 0, total: 0, bills: 0 });
+      const c = byCust[name] || (byCust[name] = { name, mobile: "", outstanding: 0, total: 0, bills: 0, billList: [] });
       c.outstanding += out; c.total += (s.total || 0); c.bills += 1;
+      c.billList.push(s);
       if (s.mobile) c.mobile = s.mobile;
     });
-    const customers = Object.values(byCust).map((c) => ({ ...c, outstanding: money(c.outstanding), total: money(c.total) })).sort((a, b) => b.outstanding - a.outstanding);
-    return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + Math.max(0, (s.total || 0) - (s.paid || 0)), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
+    const customers = Object.values(byCust).map((c) => ({
+      ...c, outstanding: money(c.outstanding), total: money(c.total),
+      // Oldest bills first — repayments naturally clear the longest-standing debt.
+      billList: [...c.billList].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
+    })).sort((a, b) => b.outstanding - a.outstanding);
+    return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + billOut(s), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
   }, [sales]);
+
+  const toggle = (name) => setOpenCust((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; });
+
+  const openPay = (sale) => { setPaying(sale); setPayAmt(String(billOut(sale))); setPayMode(sale.paidMode || "Cash"); };
+
+  // Current outstanding/figures for the bill being paid are read live from `sales`, so the
+  // modal stays correct even if the underlying record changed (e.g. edited elsewhere).
+  const payingLive = paying ? sales.find((s) => s.id === paying.id) : null;
+  const payOut = payingLive ? billOut(payingLive) : 0;
+  const payAmtNum = Math.min(payOut, Math.max(0, money(+payAmt || 0)));
+  const payRemaining = money(payOut - payAmtNum);
+
+  const savePayment = () => {
+    if (!payingLive) return setPaying(null);
+    if (payAmtNum <= 0) return notify("Enter an amount greater than ₹0");
+    const newPaid = money((payingLive.paid || 0) + payAmtNum);
+    const rem = money((payingLive.total || 0) - newPaid);
+    // Single setSales → Sales History, dashboard and cloud sync all pick up the new paid/outstanding.
+    setSales((all) => all.map((x) => (x.id === payingLive.id ? { ...x, paid: newPaid, paidMode: payMode } : x)));
+    const who = (payingLive.customer || "").trim() || "(no name)";
+    log("sale", `Udhari repayment ${INR(payAmtNum)} (${payMode}) from ${who}${rem > 0 ? ` — ${INR(rem)} still due` : " — bill cleared"}`);
+    notify(`Recorded ${INR(payAmtNum)} (${payMode})${rem > 0 ? ` · ${INR(rem)} still due` : " · bill cleared 🎉"}`);
+    setPaying(null);
+  };
 
   return (
     <div>
@@ -3171,21 +3207,84 @@ function Udhari({ sales }) {
           <Empty text="No outstanding credit — all udhari settled. 🎉" />
         ) : (
           <table className="tbl">
-            <thead><tr><th>Customer</th><th>Mobile</th><th style={{ textAlign: "right" }}>Bills</th><th style={{ textAlign: "right" }}>Outstanding</th></tr></thead>
+            <thead><tr><th style={{ width: 18 }}></th><th>Customer</th><th>Mobile</th><th style={{ textAlign: "right" }}>Bills</th><th style={{ textAlign: "right" }}>Outstanding</th><th></th></tr></thead>
             <tbody>
-              {udhari.withDue.map((c) => (
-                <tr key={c.name}>
-                  <td style={{ fontWeight: 600 }}>{c.name}</td>
-                  <td style={{ color: "#677" }}>{c.mobile || "—"}</td>
-                  <td style={{ textAlign: "right" }}>{c.bills}</td>
-                  <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(c.outstanding)}</td>
-                </tr>
-              ))}
+              {udhari.withDue.map((c) => {
+                const isOpen = openCust.has(c.name);
+                const dueBills = c.billList.filter((b) => billOut(b) > 0);
+                // Record from the customer row: one bill → pay it straight away; several → expand to choose.
+                const recordRow = () => (dueBills.length === 1 ? openPay(dueBills[0]) : toggle(c.name));
+                return (
+                  <Fragment key={c.name}>
+                    <tr onClick={() => toggle(c.name)} style={{ cursor: "pointer" }}>
+                      <td style={{ color: "#8A9C90" }}>{isOpen ? "▾" : "▸"}</td>
+                      <td style={{ fontWeight: 600 }}>{c.name}</td>
+                      <td style={{ color: "#677" }}>{c.mobile || "—"}</td>
+                      <td style={{ textAlign: "right" }}>{c.bills}</td>
+                      <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(c.outstanding)}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button className="btn small primary" onClick={(e) => { e.stopPropagation(); recordRow(); }}>
+                          {dueBills.length === 1 ? "Pay" : "Pay ▸"}
+                        </button>
+                      </td>
+                    </tr>
+                    {isOpen && dueBills.map((b) => (
+                      <tr key={b.id} style={{ background: "#FAFBF8" }}>
+                        <td></td>
+                        <td colSpan={3} style={{ fontSize: 12.5, color: "#566" }}>
+                          {b.date} · bill {INR(b.total)}{(b.paid || 0) > 0 ? ` · paid ${INR(b.paid)}${b.paidMode ? " (" + b.paidMode + ")" : ""}` : ""}
+                        </td>
+                        <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(billOut(b))}</td>
+                        <td style={{ textAlign: "right" }}>
+                          <button className="btn small" onClick={(e) => { e.stopPropagation(); openPay(b); }}>Pay</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         )}
-        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Record repayments in Sales History → open the bill → Edit → “Amount paid”.</div>
+        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Tap a customer to see their bills, then Pay a full or part repayment (Cash / UPI). Sales History updates automatically.</div>
       </section>
+
+      {paying && payingLive && (
+        // Close only when the press STARTS on the backdrop itself. Using onClick here would
+        // also fire when a drag/tap that began inside the input releases over the backdrop,
+        // closing the modal mid-payment.
+        <div style={S.overlay} onMouseDown={(e) => { if (e.target === e.currentTarget) setPaying(null); }}>
+          <div style={S.modal}>
+            <h2 style={{ fontSize: 17, margin: "0 0 4px" }}>Pay</h2>
+            <div style={{ fontSize: 13, color: "#566", marginBottom: 14 }}>
+              <b>{(payingLive.customer || "").trim() || "(no name)"}</b> · {payingLive.date} · bill {INR(payingLive.total)}
+              {(payingLive.paid || 0) > 0 ? ` · already paid ${INR(payingLive.paid)}` : ""} · <span style={{ color: "#C44536", fontWeight: 600 }}>outstanding {INR(payOut)}</span>
+            </div>
+            <Field label="Amount received">
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input className="input" style={{ flex: 1 }} type="number" min="0" step="0.01" max={payOut} value={payAmt} onChange={(e) => setPayAmt(e.target.value)} autoFocus aria-label="Amount received" />
+                <button className="btn small ghost" onClick={() => setPayAmt(String(payOut))}>Full</button>
+              </div>
+            </Field>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
+              <span style={{ fontSize: 12, color: "#6B7E74", fontWeight: 600 }}>Paid via</span>
+              {["Cash", "UPI"].map((m) => (
+                <button key={m} className={"btn small " + (payMode === m ? "primary" : "ghost")} onClick={() => setPayMode(m)}>{m}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 13, textAlign: "right", marginBottom: 14, fontWeight: 600 }}>
+              Paying {INR(payAmtNum)} ({payMode})
+              {payRemaining > 0
+                ? <span style={{ color: "#C44536" }}> · remaining {INR(payRemaining)}</span>
+                : <span style={{ color: "#1B5E43" }}> · clears this bill 🎉</span>}
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setPaying(null)}>Cancel</button>
+              <button className="btn primary" onClick={savePayment} disabled={payAmtNum <= 0}>Pay</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
