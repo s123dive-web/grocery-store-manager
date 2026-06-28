@@ -927,6 +927,12 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
         </ChartCard>
       </div>
 
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title={`Payments in ${monthName} — Total vs Cash vs UPI`} height={200}>
+          {renderPayMix(monthSales)}
+        </ChartCard>
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
         <section style={S.panel}>
           <div style={S.panelHead}>
@@ -2822,6 +2828,40 @@ const ChartCard = ({ title, children, height = 240 }) => (
   </section>
 );
 
+// Revenue split by how the bill was paid. Total includes everything (Udhari/credit too);
+// Cash and UPI are the by-mode buckets. Shared by the Dashboard and Finance bar charts.
+const PAYMIX_COLORS = ["#10331F", "#1B5E43", "#2A6FB0"]; // Total · Cash · UPI
+const payMix = (sales) => {
+  let total = 0, cash = 0, upi = 0;
+  sales.forEach((s) => {
+    const v = s.total || 0;
+    total += v;
+    if (s.payment === "Cash") cash += v;
+    else if (s.payment === "UPI") upi += v;
+  });
+  return [
+    { name: "Total", value: money(total) },
+    { name: "Cash", value: money(cash) },
+    { name: "UPI", value: money(upi) },
+  ];
+};
+// Returns a BarChart ELEMENT (not a component) so it can be the direct child of ChartCard's
+// ResponsiveContainer, which clones its child to inject width/height.
+const renderPayMix = (sales) => {
+  const data = payMix(sales);
+  return (
+    <BarChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+      <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+      <XAxis dataKey="name" tick={{ fontSize: 12, fill: "#678" }} />
+      <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+      <Tooltip formatter={(v) => INR(v)} />
+      <Bar dataKey="value" name="Amount" radius={[3, 3, 0, 0]}>
+        {data.map((d, i) => <Cell key={d.name} fill={PAYMIX_COLORS[i]} />)}
+      </Bar>
+    </BarChart>
+  );
+};
+
 // ---------- Finance (analytics) ----------
 const PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisYear", "This year"], ["custom", "Custom"]];
 // Finance offers a few extra longer windows; Stats keeps the base PERIODS list.
@@ -2871,6 +2911,12 @@ function Finance({ sales, expenses }) {
         <Card label="Gross profit" value={INR(grossProfit)} sub="sales − item cost" />
         <Card label="Expenses" value={INR(expTotal)} sub={pExp.length + " entries"} />
         <Card label="Net profit" value={INR(money(grossProfit - expTotal))} sub="gross − expenses" accent />
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Total vs Cash vs UPI" height={220}>
+          {renderPayMix(pSales)}
+        </ChartCard>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginTop: 16 }}>
