@@ -2711,7 +2711,12 @@ function periodRange(preset, cfrom, cto) {
     case "lastMonth": { const d = new Date(y, m - 1, 1); return { from: som(d.getFullYear(), d.getMonth()), to: eom(d.getFullYear(), d.getMonth()), label: d.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) }; }
     case "thisYear": return { from: dateStr(new Date(y, 0, 1)), to: dateStr(now), label: "Year " + y };
     case "last7": { const d = new Date(); d.setDate(d.getDate() - 6); return { from: dateStr(d), to: dateStr(now), label: "Last 7 days" }; }
+    case "last14": { const d = new Date(); d.setDate(d.getDate() - 13); return { from: dateStr(d), to: dateStr(now), label: "Last 14 days" }; }
     case "last30": { const d = new Date(); d.setDate(d.getDate() - 29); return { from: dateStr(d), to: dateStr(now), label: "Last 30 days" }; }
+    case "last45": { const d = new Date(); d.setDate(d.getDate() - 44); return { from: dateStr(d), to: dateStr(now), label: "Last 45 days" }; }
+    // Month-based windows: new Date(y, m-N, day) rolls the year correctly and clamps overflow days.
+    case "last2m": { const d = new Date(y, m - 2, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 2 months" }; }
+    case "lastQuarter": { const d = new Date(y, m - 3, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last quarter" }; }
     case "custom": return { from: cfrom || dateStr(now), to: cto || dateStr(now), label: `${cfrom || "…"} → ${cto || "…"}` };
     default: return { from: som(y, m), to: dateStr(now), label: now.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) };
   }
@@ -2745,6 +2750,8 @@ const ChartCard = ({ title, children, height = 240 }) => (
 
 // ---------- Finance (analytics) ----------
 const PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisYear", "This year"], ["custom", "Custom"]];
+// Finance offers a few extra longer windows; Stats keeps the base PERIODS list.
+const FINANCE_PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last14", "Last 14 days"], ["last30", "Last 30 days"], ["last45", "Last 45 days"], ["last2m", "Last 2 months"], ["lastQuarter", "Last quarter"], ["thisYear", "This year"], ["custom", "Custom"]];
 
 function Finance({ sales, expenses }) {
   const [preset, setPreset] = useState("thisMonth");
@@ -2774,7 +2781,7 @@ function Finance({ sales, expenses }) {
     <div>
       <Header title="Finance" sub={label}>
         <select className="input" style={{ width: "auto" }} value={preset} onChange={(e) => setPreset(e.target.value)}>
-          {PERIODS.map(([k, lbl]) => <option key={k} value={k}>{lbl}</option>)}
+          {FINANCE_PERIODS.map(([k, lbl]) => <option key={k} value={k}>{lbl}</option>)}
         </select>
       </Header>
 
