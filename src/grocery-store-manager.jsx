@@ -3322,6 +3322,31 @@ function Udhari({ sales, setSales, notify, log }) {
     return { customers, count: u.length, totalOutstanding: money(u.reduce((a, s) => a + billOut(s), 0)), withDue: customers.filter((c) => c.outstanding > 0) };
   }, [sales]);
 
+  // A chronological ledger of every udhari event: credit given (bill date) and each repayment
+  // (from the payments ledger; legacy/uncaptured paid amounts reconcile to the bill date).
+  const history = useMemo(() => {
+    const events = [];
+    sales.filter((s) => s.payment === "Udhari").forEach((s) => {
+      const who = (s.customer || "").trim() || "(no name)";
+      events.push({ id: s.id + "-c", date: s.date, kind: "credit", who, amount: money(s.total || 0) });
+      const ledger = Array.isArray(s.payments) ? s.payments : [];
+      let ledgerSum = 0;
+      ledger.forEach((p, i) => {
+        const amt = money(p.amount || 0);
+        ledgerSum += amt;
+        events.push({ id: `${s.id}-p${p.id || i}`, date: p.date || s.date, kind: "paid", who, amount: amt, mode: p.mode || "—" });
+      });
+      const rem = money((s.paid || 0) - ledgerSum);
+      if (rem > 0.005) events.push({ id: s.id + "-p0", date: s.date, kind: "paid", who, amount: rem, mode: s.paidMode || "—", atStart: true });
+    });
+    // Strictly date-descending (newest first). On the same date the repayment (the later
+    // action) sorts above the credit, keeping the whole list consistently most-recent-first.
+    events.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.kind === b.kind ? 0 : a.kind === "paid" ? -1 : 1)));
+    const totalCredit = money(events.filter((e) => e.kind === "credit").reduce((a, e) => a + e.amount, 0));
+    const totalPaid = money(events.filter((e) => e.kind === "paid").reduce((a, e) => a + e.amount, 0));
+    return { events, totalCredit, totalPaid };
+  }, [sales]);
+
   const toggle = (name) => setOpenCust((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; });
 
   const openPay = (sale) => { setPaying(sale); setPayAmt(String(billOut(sale))); setPayMode(sale.paidMode || "Cash"); };
@@ -3339,7 +3364,12 @@ function Udhari({ sales, setSales, notify, log }) {
     const newPaid = money((payingLive.paid || 0) + payAmtNum);
     const rem = money((payingLive.total || 0) - newPaid);
     // Single setSales → Sales History, dashboard and cloud sync all pick up the new paid/outstanding.
-    setSales((all) => all.map((x) => (x.id === payingLive.id ? { ...x, paid: newPaid, paidMode: payMode } : x)));
+    // Also append a dated entry to the payments ledger so the History panel can show when it was paid.
+    setSales((all) => all.map((x) => {
+      if (x.id !== payingLive.id) return x;
+      const payments = [...(x.payments || []), { id: uid(), date: todayStr(), amount: payAmtNum, mode: payMode }];
+      return { ...x, paid: newPaid, paidMode: payMode, payments };
+    }));
     const who = (payingLive.customer || "").trim() || "(no name)";
     log("sale", `Udhari repayment ${INR(payAmtNum)} (${payMode}) from ${who}${rem > 0 ? ` — ${INR(rem)} still due` : " — bill cleared"}`);
     notify(`Recorded ${INR(payAmtNum)} (${payMode})${rem > 0 ? ` · ${INR(rem)} still due` : " · bill cleared 🎉"}`);
@@ -3400,6 +3430,39 @@ function Udhari({ sales, setSales, notify, log }) {
           </table>
         )}
         <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Tap a customer to see their bills, then Pay a full or part repayment (Cash / UPI). Sales History updates automatically.</div>
+      </section>
+
+      <section style={{ ...S.panel, marginTop: 16 }}>
+        <div style={S.panelHead}>
+          History
+          <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0, color: "#8A9C90", marginLeft: 8 }}>{history.events.length} event{history.events.length === 1 ? "" : "s"}</span>
+          <span style={{ marginLeft: "auto", fontWeight: 500, fontSize: 12, color: "#8A9C90", textTransform: "none", letterSpacing: 0 }}>
+            Credit given <b style={{ color: "#C44536" }}>{INR(history.totalCredit)}</b> · Repaid <b style={{ color: "#1B5E43" }}>{INR(history.totalPaid)}</b>
+          </span>
+        </div>
+        {history.events.length === 0 ? (
+          <Empty text="No udhari/credit activity yet." />
+        ) : (
+          <table className="tbl">
+            <thead><tr><th>Date</th><th>Customer</th><th>Type</th><th style={{ textAlign: "right" }}>Amount</th><th>Mode</th></tr></thead>
+            <tbody>
+              {history.events.slice(0, 150).map((e) => (
+                <tr key={e.id}>
+                  <td style={{ whiteSpace: "nowrap", color: "#677" }}>{e.date}</td>
+                  <td style={{ fontWeight: 600 }}>{e.who}</td>
+                  <td>
+                    {e.kind === "credit"
+                      ? <span style={{ fontSize: 10.5, fontWeight: 800, color: "#C44536", border: "1px solid #C44536", borderRadius: 6, padding: "1px 6px" }}>CREDIT</span>
+                      : <span style={{ fontSize: 10.5, fontWeight: 800, color: "#1B5E43", border: "1px solid #1B5E43", borderRadius: 6, padding: "1px 6px" }}>PAID</span>}
+                  </td>
+                  <td style={{ textAlign: "right", fontWeight: 700, color: e.kind === "credit" ? "#C44536" : "#1B5E43" }}>{e.kind === "credit" ? INR(e.amount) : "− " + INR(e.amount)}</td>
+                  <td style={{ color: "#677", fontSize: 12 }}>{e.kind === "paid" ? (e.mode || "—") + (e.atStart ? " · at billing" : "") : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {history.events.length > 150 && <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Showing the most recent 150 of {history.events.length} events.</div>}
       </section>
 
       {paying && payingLive && (
