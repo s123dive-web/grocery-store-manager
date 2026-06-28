@@ -511,8 +511,29 @@ export default function App() {
 }
 
 // ---------- main app ----------
+// Top-level sidebar destinations, plus the secondary group tucked under "Other".
+// Both feed the same `tab` switch below — grouping is purely a nav-rendering concern.
+const TOP_TABS = [
+  ["dashboard", "⌂", "Dashboard"],
+  ["billing", "₹", "Billing (POS)"],
+  ["inventory", "▦", "Inventory"],
+  ["sales", "⊟", "Sales History"],
+  ["finance", "∑", "Finance"],
+  ["expense", "⊝", "Add Expense"],
+  ["logs", "❑", "Activity Log"],
+];
+const OTHER_TABS = [
+  ["stats", "📊", "Stats"],
+  ["alerts", "⚠", "Alerts"],
+  ["vendorbills", "🧾", "Vendor Bills"],
+  ["raw", "⇪", "Data Import"],
+  ["barcode", "▥", "Barcode Creator"],
+  ["admin", "⚙", "Admin"],
+];
+
 function StoreManager({ user, onLogout }) {
   const [tab, setTab] = useState("dashboard");
+  const [otherOpen, setOtherOpen] = useState(false);
   const [items, setItems] = useState([]);
   const [sales, setSales] = useState([]);
   const [expenses, setExpenses] = useState([]);
@@ -695,6 +716,9 @@ function StoreManager({ user, onLogout }) {
 
   const lowStock = items.filter((i) => i.stock <= i.lowAt);
   const alertCount = lowStock.length + items.filter((i) => { const d = daysToExpiry(i); return d != null && d <= 30; }).length;
+  // Show the "Other" sub-list when the user toggled it open, or whenever an active tab
+  // lives inside it (so the current page is never hidden behind a collapsed group).
+  const showOther = otherOpen || OTHER_TABS.some(([k]) => k === tab);
 
   return (
     <div className="app" style={S.app}>
@@ -708,26 +732,28 @@ function StoreManager({ user, onLogout }) {
             <div style={{ fontSize: 10.5, color: "#9DB5A8", lineHeight: 1.3 }}>{STORE.address}</div>
           </div>
         </div>
-        {[
-          ["dashboard", "⌂", "Dashboard"],
-          ["billing", "₹", "Billing (POS)"],
-          ["inventory", "▦", "Inventory"],
-          ["alerts", "⚠", "Alerts"],
-          ["sales", "⊟", "Sales History"],
-          ["finance", "∑", "Finance"],
-          ["stats", "📊", "Stats"],
-          ["expense", "⊝", "Add Expense"],
-          ["vendorbills", "🧾", "Vendor Bills"],
-          ["raw", "⇪", "Data Import"],
-          ["barcode", "▥", "Barcode Creator"],
-          ["logs", "❑", "Activity Log"],
-          ["admin", "⚙", "Admin"],
-        ].map(([k, ic, label]) => (
+        {TOP_TABS.map(([k, ic, label]) => (
           <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
             <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
             {k === "inventory" && lowStock.length > 0 && (
               <span style={S.badge}>{lowStock.length}</span>
             )}
+          </button>
+        ))}
+        {/* "Other" group — collapses the secondary sections. Auto-opens when one of its
+            tabs is active so the current page is always visible in the rail. */}
+        <button
+          className={"navbtn" + (showOther ? " active" : "")}
+          onClick={() => setOtherOpen((o) => !o)}
+          aria-expanded={showOther}
+        >
+          <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>⋯</span> Other
+          <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.8 }}>{showOther ? "▾" : "▸"}</span>
+          {!showOther && alertCount > 0 && <span style={S.badge}>{alertCount}</span>}
+        </button>
+        {showOther && OTHER_TABS.map(([k, ic, label]) => (
+          <button key={k} className={"navbtn sub" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
+            <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
             {k === "alerts" && alertCount > 0 && (
               <span style={S.badge}>{alertCount}</span>
             )}
@@ -3765,6 +3791,8 @@ const CSS = `
   .navbtn { display:flex; align-items:center; gap:6px; width:100%; text-align:left; background:none; border:none; color:#BCD2C4; padding:10px 12px; border-radius:9px; font-size:13.5px; font-weight:600; cursor:pointer; position:relative; }
   .navbtn:hover { background:#1A4A2E; color:#fff; }
   .navbtn.active { background:#1B5E43; color:#fff; }
+  .navbtn.sub { padding-left:26px; font-size:13px; color:#A8C2B4; }
+  .navbtn.sub::before { content:""; position:absolute; left:14px; top:9px; bottom:9px; width:2px; background:#2A5A3E; border-radius:2px; }
   .input { width:100%; box-sizing:border-box; padding:10px 12px; border:1.5px solid #D5E0D6; border-radius:9px; font-size:14px; background:#fff; outline:none; font-family:inherit; }
   .input:focus { border-color:#1B5E43; box-shadow:0 0 0 3px rgba(27,94,67,.12); }
   .btn { border:none; border-radius:9px; padding:9px 16px; font-size:13.5px; font-weight:700; cursor:pointer; background:#E4ECE5; color:#23402F; font-family:inherit; }
