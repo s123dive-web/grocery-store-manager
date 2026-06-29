@@ -2353,10 +2353,24 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
   const [openDates, setOpenDates] = useState(() => new Set()); // expanded past dates (today is always open)
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [q, setQ] = useState(""); // free-text search across bills
   const [editing, setEditing] = useState(null); // { id, date, payment, lines:[...], orig:[...] }
   const toggleDate = (d) => setOpenDates((s) => { const n = new Set(s); n.has(d) ? n.delete(d) : n.add(d); return n; });
 
-  const visible = sales.filter((s) => (!from || s.date >= from) && (!to || s.date <= to));
+  // Search matches a bill when EVERY space-separated term is found somewhere in it —
+  // item names, customer, mobile, payment, date/time, bill id, or any amount/quantity.
+  const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const searching = terms.length > 0;
+  const matchSale = (s) => {
+    if (!searching) return true;
+    const hay = [
+      s.date, s.time, s.payment, s.customer, s.mobile, s.id, s.total, s.profit, s.paid,
+      ...(s.lines || []).flatMap((l) => [l.name, l.qty, l.amount, l.price]),
+    ].filter((v) => v != null).join(" ").toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  };
+
+  const visible = sales.filter((s) => (!from || s.date >= from) && (!to || s.date <= to) && matchSale(s));
   const byDate = useMemo(() => {
     const m = {};
     [...visible].reverse().forEach((s) => { (m[s.date] = m[s.date] || []).push(s); });
@@ -2541,6 +2555,17 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     <div>
       <Header title="Sales History" sub={`${visible.length} of ${sales.length} bills · ${INR(rangeTotal)}`} />
 
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+        <input
+          className="input"
+          style={{ flex: 1, minWidth: 0 }}
+          placeholder="🔍 Search bills — item, customer, mobile, amount, payment…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        {q && <button className="btn ghost small" onClick={() => setQ("")}>Clear search</button>}
+      </div>
+
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
         <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={from} max={to || todayStr()} onChange={(e) => setFrom(e.target.value)} /></label>
         <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={to} max={todayStr()} onChange={(e) => setTo(e.target.value)} /></label>
@@ -2548,11 +2573,12 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
       </div>
 
       {sales.length === 0 && <section style={S.panel}><Empty text="No sales yet. Bills will appear here after you complete a sale." /></section>}
-      {sales.length > 0 && visible.length === 0 && <section style={S.panel}><Empty text="No bills in this date range." /></section>}
+      {sales.length > 0 && visible.length === 0 && <section style={S.panel}><Empty text={searching ? `No bills match “${q.trim()}”${from || to ? " in this date range" : ""}.` : "No bills in this date range."} /></section>}
       {byDate.map(([date, list]) => {
         const isToday = date === todayStr();
-        // Today is always open; every other date collapses (closed by default) so the list scans quickly.
-        const expanded = isToday || openDates.has(date);
+        // Today is always open; every other date collapses (closed by default) so the list scans
+        // quickly. While searching, open every matching date so the results are all visible.
+        const expanded = isToday || searching || openDates.has(date);
         return (
         <section key={date} style={{ ...S.panel, marginBottom: 14 }}>
           <div
@@ -2571,13 +2597,14 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
               <div style={{ ...S.row, cursor: "pointer" }} onClick={() => setOpen(open === s.id ? null : s.id)}>
                 <span>
                   {s.time} · {s.lines.length} item{s.lines.length > 1 ? "s" : ""}
+                  {searching && <span style={{ marginLeft: 6, fontSize: 11, color: "#8A9C90" }}>{new Date(s.date + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>}
                   {s.payment && <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: PAY_COLORS[s.payment] || "#789", border: `1px solid ${PAY_COLORS[s.payment] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{s.payment}{s.customer ? " · " + s.customer : ""}{s.mobile ? " · " + s.mobile : ""}</span>}
                 </span>
                 <span><b>{INR(s.total)}</b> <span style={{ color: "#1B5E43", fontSize: 12 }}>(+{INR(s.profit)})</span>
                   {s.payment === "Udhari" && (s.total - (s.paid || 0)) > 0 && <span style={{ color: "#C44536", fontSize: 11.5, fontWeight: 700, marginLeft: 6 }}>{INR(money(s.total - (s.paid || 0)))} due</span>}
                   {" "}{open === s.id ? "▾" : "▸"}</span>
               </div>
-              {open === s.id && (
+              {(open === s.id || searching) && (
                 <div style={{ background: "#F4F7F4", borderRadius: 8, padding: "8px 12px", margin: "0 0 8px" }}>
                   {s.lines.map((l, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
