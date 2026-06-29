@@ -22,10 +22,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 24 ships npm 11, which correctly skips esbuild's foreign-platform
+          # optional deps during `npm ci`. npm 10 (Node 20) errors EBADPLATFORM on them.
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm test
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
