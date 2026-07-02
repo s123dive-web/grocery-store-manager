@@ -901,6 +901,27 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
     return buildSeries(sales, [], dateStr(d), todayStr());
   }, [sales]);
 
+  // Fixed monthly overview: one bucket per calendar month from May 2026 through the current
+  // month, regardless of the day picker above. Months with no sales show as zero bars.
+  const monthly = useMemo(() => {
+    const nowKey = todayStr().slice(0, 7);
+    const keys = [];
+    let y = 2026, m = 5; // start: May 2026
+    const [ey, em] = nowKey.split("-").map(Number);
+    while (y < ey || (y === ey && m <= em)) {
+      keys.push(`${y}-${String(m).padStart(2, "0")}`);
+      m++; if (m > 12) { m = 1; y++; }
+    }
+    const agg = Object.fromEntries(keys.map((k) => [k, { revenue: 0, profit: 0 }]));
+    sales.forEach((s) => { const k = (s.date || "").slice(0, 7); if (agg[k]) { agg[k].revenue += s.total || 0; agg[k].profit += s.profit || 0; } });
+    return keys.map((k) => ({
+      key: k,
+      label: new Date(k + "-01T00:00").toLocaleDateString("en-IN", { month: "short", year: "2-digit" }),
+      revenue: money(agg[k].revenue),
+      profit: money(agg[k].profit),
+    }));
+  }, [sales]);
+
   return (
     <div>
       <Header title="Dashboard" sub={niceDate}>
@@ -976,6 +997,43 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             ))
           )}
         </section>
+      </div>
+
+      <div style={{ fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em", margin: "22px 0 8px" }}>
+        Monthly overview <span style={{ fontWeight: 500, color: "#8A9C90" }}>(from May 2026)</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <ChartCard title="Monthly revenue" height={220}>
+          <BarChart data={monthly} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
+        </ChartCard>
+        <ChartCard title="Monthly profit" height={220}>
+          <BarChart data={monthly} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
+        </ChartCard>
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Monthly revenue vs profit" height={240}>
+          <BarChart data={monthly} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
+        </ChartCard>
       </div>
     </div>
   );
@@ -2863,6 +2921,10 @@ function Logs({ logs, setLogs, notify }) {
 // ---------- Finance analytics helpers ----------
 const PIE_COLORS = ["#1B5E43", "#E8A33D", "#2A6FB0", "#C44536", "#7A5AB0", "#3DA17A", "#B0762A", "#8A9C90"];
 const inrTick = (v) => "₹" + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + "k" : v);
+// Value labels for bar charts (compact ₹). Zeros are hidden so sparse charts stay uncluttered.
+// `barLabel` sits on top of vertical bars; `barLabelRight` sits at the end of horizontal bars.
+const barLabel = { position: "top", formatter: (v) => (v ? inrTick(v) : ""), fontSize: 9.5, fill: "#465" };
+const barLabelRight = { position: "right", formatter: (v) => (v ? inrTick(v) : ""), fontSize: 9.5, fill: "#465" };
 
 // Resolve a period preset (+ optional custom range) to { from, to, label }.
 function periodRange(preset, cfrom, cto) {
@@ -2933,12 +2995,12 @@ const payMix = (sales) => {
 const renderPayMix = (sales) => {
   const data = payMix(sales);
   return (
-    <BarChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+    <BarChart data={data} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
       <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
       <XAxis dataKey="name" tick={{ fontSize: 12, fill: "#678" }} />
       <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
       <Tooltip formatter={(v) => INR(v)} />
-      <Bar dataKey="value" name="Amount" radius={[3, 3, 0, 0]}>
+      <Bar dataKey="value" name="Amount" radius={[3, 3, 0, 0]} label={barLabel}>
         {data.map((d, i) => <Cell key={d.name} fill={PAYMIX_COLORS[i]} />)}
       </Bar>
     </BarChart>
@@ -3251,14 +3313,14 @@ function Stats({ sales, expenses, items }) {
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
             <ChartCard title="Average revenue & profit by weekday">
-              <BarChart data={weekdayData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+              <BarChart data={weekdayData} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
                 <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#678" }} />
                 <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
                 <Tooltip formatter={(v) => INR(v)} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="revenue" name="Avg revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="profit" name="Avg profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="revenue" name="Avg revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+                <Bar dataKey="profit" name="Avg profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
               </BarChart>
             </ChartCard>
             <section style={S.panel}>
@@ -3282,22 +3344,22 @@ function Stats({ sales, expenses, items }) {
               {hourData.length === 0 ? (
                 <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No clock-timed bills in this period." /></div>
               ) : (
-                <BarChart data={hourData} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+                <BarChart data={hourData} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
                   <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={12} />
                   <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
                   <Tooltip formatter={(v) => INR(v)} />
-                  <Bar dataKey="revenue" name="Revenue" fill="#2A6FB0" radius={[3, 3, 0, 0]} />
+                  <Bar dataKey="revenue" name="Revenue" fill="#2A6FB0" radius={[3, 3, 0, 0]} label={barLabel} />
                 </BarChart>
               )}
             </ChartCard>
             <ChartCard title="Revenue by part of month">
-              <BarChart data={monthPart} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+              <BarChart data={monthPart} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
                 <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#678" }} />
                 <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
                 <Tooltip formatter={(v) => INR(v)} />
-                <Bar dataKey="revenue" name="Revenue" fill="#7A5AB0" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="revenue" name="Revenue" fill="#7A5AB0" radius={[3, 3, 0, 0]} label={barLabel} />
               </BarChart>
             </ChartCard>
           </div>
@@ -3331,12 +3393,12 @@ function Stats({ sales, expenses, items }) {
               {categoryData.length === 0 ? (
                 <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No category data." /></div>
               ) : (
-                <BarChart data={categoryData} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
+                <BarChart data={categoryData} layout="vertical" margin={{ top: 4, right: 48, left: 8, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} />
                   <YAxis type="category" dataKey="name" tick={{ fontSize: 10.5, fill: "#465" }} width={110} />
                   <Tooltip formatter={(v) => INR(v)} />
-                  <Bar dataKey="revenue" name="Revenue" fill="#3DA17A" radius={[0, 3, 3, 0]} />
+                  <Bar dataKey="revenue" name="Revenue" fill="#3DA17A" radius={[0, 3, 3, 0]} label={barLabelRight} />
                 </BarChart>
               )}
             </ChartCard>
