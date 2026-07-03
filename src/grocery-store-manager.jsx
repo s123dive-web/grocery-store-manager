@@ -952,6 +952,23 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
     return buildSeries(sales, [], dateStr(d), todayStr());
   }, [sales]);
 
+  // --- "Over time" charts: user picks a period, we show day-wise & week-wise series. ---
+  const [period, setPeriod] = useState("7d");
+  const [customFrom, setCustomFrom] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 6); return dateStr(d); });
+  const [customTo, setCustomTo] = useState(todayStr());
+  const range = useMemo(() => {
+    if (period === "custom") return { from: customFrom, to: customTo };
+    const opt = DASH_PERIODS.find((p) => p[0] === period);
+    const d = new Date(); (opt?.[2] || (() => {}))(d);
+    return { from: dateStr(d), to: todayStr() };
+  }, [period, customFrom, customTo]);
+  const dailySeries = useMemo(() => buildDaily(sales, range.from, range.to), [sales, range.from, range.to]);
+  const weeklySeries = useMemo(() => buildWeekly(sales, range.from, range.to), [sales, range.from, range.to]);
+  const rangeLabel = useMemo(() => {
+    const f = (ds) => new Date(ds + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+    return range.from && range.to ? `${f(range.from)} – ${f(range.to)}` : "";
+  }, [range]);
+
   // Fixed monthly overview: one bucket per calendar month from May 2026 through the current
   // month, regardless of the day picker above. Months with no sales show as zero bars.
   const monthly = useMemo(() => {
@@ -1083,6 +1100,91 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
             <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
+        </ChartCard>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, margin: "22px 0 8px" }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em" }}>Revenue &amp; profit over time</span>
+        <select className="input" style={{ width: "auto" }} value={period} onChange={(e) => setPeriod(e.target.value)}>
+          {DASH_PERIODS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
+        {period === "custom" && (
+          <>
+            <input type="date" className="input" style={{ width: "auto" }} value={customFrom} max={customTo || todayStr()} onChange={(e) => setCustomFrom(e.target.value)} />
+            <span style={{ color: "#8A9C90" }}>to</span>
+            <input type="date" className="input" style={{ width: "auto" }} value={customTo} max={todayStr()} onChange={(e) => setCustomTo(e.target.value)} />
+          </>
+        )}
+        {rangeLabel && <span style={{ fontSize: 12, color: "#8A9C90" }}>{rangeLabel}</span>}
+      </div>
+
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#4A5D52", margin: "10px 0 6px" }}>Day wise</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <ChartCard title="Day wise revenue" height={220}>
+          <BarChart data={dailySeries} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ChartCard>
+        <ChartCard title="Day wise profit" height={220}>
+          <BarChart data={dailySeries} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ChartCard>
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Day wise revenue vs profit" height={240}>
+          <BarChart data={dailySeries} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ChartCard>
+      </div>
+
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#4A5D52", margin: "18px 0 6px" }}>Week wise <span style={{ fontWeight: 500, color: "#8A9C90" }}>(week starting Mon)</span></div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <ChartCard title="Week wise revenue" height={220}>
+          <BarChart data={weeklySeries} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} labelFormatter={(l) => "Week of " + l} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
+        </ChartCard>
+        <ChartCard title="Week wise profit" height={220}>
+          <BarChart data={weeklySeries} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} labelFormatter={(l) => "Week of " + l} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
+        </ChartCard>
+      </div>
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Week wise revenue vs profit" height={240}>
+          <BarChart data={weeklySeries} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+            <Tooltip formatter={(v) => INR(v)} labelFormatter={(l) => "Week of " + l} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
           </BarChart>
         </ChartCard>
       </div>
@@ -3025,6 +3127,54 @@ function buildSeries(sales, expenses, from, to) {
   expenses.forEach((e) => { const b = buckets.get(keyOf(e.date)); if (b) b.expenses += e.amount; });
   return [...buckets.values()].map((b) => ({ ...b, revenue: money(b.revenue), profit: money(b.profit), expenses: money(b.expenses), cash: money(b.cash), upi: money(b.upi) }));
 }
+
+// Day-wise revenue/profit buckets across [from, to] inclusive. One bucket per calendar
+// day; days with no sales show as zero. Used by the Dashboard "period" charts.
+function buildDaily(sales, from, to) {
+  const start = new Date(from + "T00:00"), end = new Date(to + "T00:00");
+  if (isNaN(start) || isNaN(end) || end < start) return [];
+  const buckets = new Map();
+  const d = new Date(start);
+  while (d <= end) {
+    const k = dateStr(d);
+    buckets.set(k, { key: k, label: new Date(k + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }), revenue: 0, profit: 0 });
+    d.setDate(d.getDate() + 1);
+  }
+  sales.forEach((s) => { const b = buckets.get(s.date); if (b) { b.revenue += s.total || 0; b.profit += s.profit || 0; } });
+  return [...buckets.values()].map((b) => ({ ...b, revenue: money(b.revenue), profit: money(b.profit) }));
+}
+
+// Monday that begins the week containing d.
+const weekStartOf = (d) => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); const wd = (x.getDay() + 6) % 7; x.setDate(x.getDate() - wd); return x; };
+
+// Week-wise revenue/profit buckets across [from, to] inclusive. One bucket per calendar
+// week (Mon–Sun); weeks with no sales show as zero. Labels mark the week-start date.
+function buildWeekly(sales, from, to) {
+  const start = new Date(from + "T00:00"), end = new Date(to + "T00:00");
+  if (isNaN(start) || isNaN(end) || end < start) return [];
+  const buckets = new Map();
+  const d = weekStartOf(start);
+  while (d <= end) {
+    const k = dateStr(d);
+    buckets.set(k, { key: k, label: new Date(k + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }), revenue: 0, profit: 0 });
+    d.setDate(d.getDate() + 7);
+  }
+  sales.forEach((s) => { if (!s.date) return; const b = buckets.get(dateStr(weekStartOf(new Date(s.date + "T00:00")))); if (b) { b.revenue += s.total || 0; b.profit += s.profit || 0; } });
+  return [...buckets.values()].map((b) => ({ ...b, revenue: money(b.revenue), profit: money(b.profit) }));
+}
+
+// Period options for the Dashboard "over time" charts. Each computes the from-date
+// relative to today; the range end is always today.
+const DASH_PERIODS = [
+  ["7d", "Last 7 days", (d) => d.setDate(d.getDate() - 6)],
+  ["14d", "Last 14 days", (d) => d.setDate(d.getDate() - 13)],
+  ["1m", "Last 1 month", (d) => d.setMonth(d.getMonth() - 1)],
+  ["2m", "Last 2 months", (d) => d.setMonth(d.getMonth() - 2)],
+  ["quarter", "Last quarter", (d) => d.setMonth(d.getMonth() - 3)],
+  ["6m", "Last 6 months", (d) => d.setMonth(d.getMonth() - 6)],
+  ["1y", "Last year", (d) => d.setFullYear(d.getFullYear() - 1)],
+  ["custom", "Custom date period", null],
+];
 
 const ChartCard = ({ title, children, height = 240 }) => (
   <section style={S.panel}>
