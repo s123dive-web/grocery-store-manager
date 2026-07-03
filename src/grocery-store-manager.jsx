@@ -1253,7 +1253,8 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     return m;
   }, [sales]);
 
-  // Only items in stock are sellable, so the picker only ever shows stock > 0.
+  // Only in-stock items are sellable, but sold-out ones stay visible in the picker (greyed,
+  // not tappable) so they're one tap from a quick restock — nothing has to be re-created.
   const results = useMemo(() => {
     const s = q.trim().toLowerCase();
     const inStock = items.filter((i) => (i.stock || 0) > 0);
@@ -1272,11 +1273,15 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       return [...inStockMatches.slice(0, 12), ...outMatches.slice(0, 8)];
     }
     // No search: most recently sold first, then by units sold, then the rest.
-    return [...inStock].sort((a, b) => {
+    const byActivity = (a, b) => {
       const la = lastSold[a.name] || "", lb = lastSold[b.name] || "";
       if (la !== lb) return la < lb ? 1 : -1; // newer sale date first
       return (soldQty[b.name] || 0) - (soldQty[a.name] || 0);
-    }).slice(0, 12);
+    };
+    // In-stock (sellable) lines lead; sold-out ones follow on their own budget so they stay
+    // visible for a quick restock without ever crowding out what can actually be sold.
+    const out = items.filter((i) => (i.stock || 0) <= 0).sort(byActivity);
+    return [...[...inStock].sort(byActivity).slice(0, 12), ...out.slice(0, 8)];
   }, [q, items, soldQty, lastSold]);
 
   const add = (item) => {
