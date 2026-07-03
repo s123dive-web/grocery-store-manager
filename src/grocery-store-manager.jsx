@@ -129,6 +129,32 @@ const CATEGORY_ICONS = {
 };
 const iconFor = (category) => CATEGORY_ICONS[category] || "📦";
 
+// localStorage key for shop-owner-added categories (custom categories with no item yet).
+const CUSTOM_CATS_KEY = "psm-custom-cats-v1";
+
+// The full category list shown in every dropdown = the built-in CATEGORIES, plus any category
+// already present on an item, plus custom categories the owner added. De-duped case-insensitively,
+// built-in order preserved, extras appended, and "Other" kept last. Passing items + custom here is
+// what makes a newly added category show up everywhere (add/edit item, filters) at once — and lets
+// a category created on one device appear on others as soon as an item using it syncs in.
+function catList(items = [], custom = []) {
+  const seen = new Set();
+  const out = [];
+  const add = (c) => {
+    const t = (c == null ? "" : String(c)).trim();
+    if (!t) return;
+    const k = t.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(t);
+  };
+  CATEGORIES.filter((c) => c !== "Other").forEach(add);
+  items.forEach((i) => add(i.category));
+  custom.forEach(add);
+  add("Other"); // always last
+  return out;
+}
+
 // An icon is "auto" (safe to swap when the category changes) when it's blank or still equals
 // the category's default emoji. A hand-typed custom emoji differs from the default → preserved.
 const isAutoIcon = (icon, category) => {
@@ -590,6 +616,12 @@ function StoreManager({ user, onLogout }) {
   const [expenses, setExpenses] = useState([]);
   const [logs, setLogs] = useState([]);
   const [bills, setBills] = useState([]); // vendor purchase bills (vendorBills slice)
+  // Owner-added categories that have no item yet (device-local; once an item uses one it also
+  // rides along in the synced items data). Merged with the built-ins + item categories below.
+  const [customCats, setCustomCats] = useState(() => {
+    try { const c = JSON.parse(localStorage.getItem(CUSTOM_CATS_KEY) || "[]"); return Array.isArray(c) ? c.filter((x) => typeof x === "string") : []; }
+    catch { return []; }
+  });
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -703,6 +735,25 @@ function StoreManager({ user, onLogout }) {
     toastTimer.current = setTimeout(() => { setToast(null); toastTimer.current = null; }, 2200);
   };
   notifyRef.current = notify; // let the cloud listener surface errors via the same toast
+
+  // Persist owner-added categories locally; the full list shown everywhere merges these with the
+  // built-ins and any category already on an item.
+  useEffect(() => { try { localStorage.setItem(CUSTOM_CATS_KEY, JSON.stringify(customCats)); } catch (e) { console.error("custom cats write failed", e); } }, [customCats]);
+  const cats = useMemo(() => catList(items, customCats), [items, customCats]);
+
+  // Prompt for and add a new category. Returns the canonical name to select (existing match if it's
+  // a duplicate, the new name otherwise), or null if cancelled/blank. Used by the Add/Edit forms.
+  const addCategory = useCallback(() => {
+    const raw = window.prompt("New category name:");
+    if (raw == null) return null;
+    const name = raw.trim();
+    if (!name) return null;
+    const existing = catList(dataRef.current.items, customCats).find((c) => c.toLowerCase() === name.toLowerCase());
+    if (existing) { notifyRef.current?.(`“${existing}” already exists.`); return existing; }
+    setCustomCats((cs) => [...cs, name]);
+    notifyRef.current?.(`Category “${name}” added.`);
+    return name;
+  }, [customCats]);
 
   const resetMyPassword = async () => {
     if (!user?.email) return;
@@ -846,9 +897,9 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "raw" ? (
           <RawData items={items} setItems={setItems} setSales={setSales} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
-          <Inventory items={items} setItems={setItems} notify={notify} log={addLog} />
+          <Inventory items={items} setItems={setItems} notify={notify} log={addLog} cats={cats} onAddCategory={addCategory} />
         ) : tab === "alerts" ? (
-          <Alerts items={items} goInventory={() => setTab("inventory")} />
+          <Alerts items={items} goInventory={() => setTab("inventory")} cats={cats} />
         ) : tab === "barcode" ? (
           <BarcodeCreator items={items} setItems={setItems} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
@@ -1415,7 +1466,7 @@ function mergeItemGroup(group) {
   };
 }
 
-function Inventory({ items, setItems, notify, log }) {
+function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCategory }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("All");
   const [form, setForm] = useState(null); // null | {…item, id?}
@@ -1653,7 +1704,8 @@ function Inventory({ items, setItems, notify, log }) {
       </td>
       <td onClick={stop}>
         <select className="input" style={{ padding: "6px 4px" }} value={d.category} onChange={(e) => { const c = e.target.value; sf("category", c); if (isAutoIcon(d.icon, d.category)) sf("icon", iconFor(c)); }} aria-label="Category">
-          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          {cats.map((c) => <option key={c}>{c}</option>)}
+          {d.category && !cats.includes(d.category) && <option key={d.category}>{d.category}</option>}
         </select>
       </td>
       <td onClick={stop}><input className="input" style={{ padding: "6px 4px" }} type="date" max={todayStr()} value={d.createdAt} onChange={(e) => sf("createdAt", e.target.value)} aria-label="Added date" /></td>
@@ -1692,7 +1744,7 @@ function Inventory({ items, setItems, notify, log }) {
         <input className="input" placeholder="Find an item…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
         <select className="input" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: 220 }}>
           <option>All</option>
-          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          {cats.map((c) => <option key={c}>{c}</option>)}
         </select>
       </div>
 
@@ -1829,9 +1881,18 @@ function Inventory({ items, setItems, notify, log }) {
           <Field label="Barcode / code (optional)"><input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Scan or type a barcode" /></Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Field label="Category">
-              <select className="input" value={form.category} onChange={(e) => { const c = e.target.value; setForm((f) => ({ ...f, category: c, categoryTouched: true, icon: isAutoIcon(f.icon, f.category) ? iconFor(c) : f.icon })); }}>
-                {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-              </select>
+              <div style={{ display: "flex", gap: 6 }}>
+                <select className="input" style={{ flex: 1 }} value={form.category} onChange={(e) => { const c = e.target.value; setForm((f) => ({ ...f, category: c, categoryTouched: true, icon: isAutoIcon(f.icon, f.category) ? iconFor(c) : f.icon })); }}>
+                  {cats.map((c) => <option key={c}>{c}</option>)}
+                  {form.category && !cats.includes(form.category) && <option key={form.category}>{form.category}</option>}
+                </select>
+                {onAddCategory && (
+                  <button type="button" className="btn ghost" style={{ padding: "0 10px", whiteSpace: "nowrap" }} title="Add a new category"
+                    onClick={() => { const c = onAddCategory(); if (c) setForm((f) => ({ ...f, category: c, categoryTouched: true, icon: isAutoIcon(f.icon, f.category) ? iconFor(c) : f.icon })); }}>
+                    ＋ New
+                  </button>
+                )}
+              </div>
             </Field>
             <Field label="Unit">
               <select className="input" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })}>
@@ -2781,7 +2842,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
 }
 
 // ---------- Alerts ----------
-function Alerts({ items, goInventory }) {
+function Alerts({ items, goInventory, cats = CATEGORIES }) {
   const [view, setView] = useState("low"); // low | out | expiring | expired
   const [cat, setCat] = useState("All");
   const byCat = (i) => cat === "All" || i.category === cat;
@@ -2817,7 +2878,7 @@ function Alerts({ items, goInventory }) {
         ))}
         <select className="input" style={{ width: "auto", marginLeft: "auto" }} value={cat} onChange={(e) => setCat(e.target.value)}>
           <option>All</option>
-          {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          {cats.map((c) => <option key={c}>{c}</option>)}
         </select>
       </div>
 
