@@ -1734,6 +1734,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
           </>
         ) : (
           <>
+            {onAddCategory && <><button className="btn ghost" onClick={() => onAddCategory()} title="Create a new category you can assign to items">＋ New category</button>{" "}</>}
             <button className="btn ghost" onClick={enterQuick} disabled={items.length === 0} title="Edit every row's fields directly, then save once">✎ Quick edit</button>{" "}
             <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
           </>
