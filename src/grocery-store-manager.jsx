@@ -1205,6 +1205,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [paidMode, setPaidMode] = useState("Cash"); // how that part-payment was received (UPI/Cash)
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
+  const [miscBuy, setMiscBuy] = useState(""); // optional cost/buy price for a misc line → feeds profit
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
   const [stockQty, setStockQty] = useState("");
   const [custFocus, setCustFocus] = useState(false); // customer-name field focused → show suggestions
@@ -1301,8 +1302,9 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     setCart((cart) => (q <= 0 ? cart.filter((c) => c.id !== id) : cart.map((c) => (c.id === id ? { ...c, qty: q } : c))));
   };
 
-  // A misc / custom item: only a price is required (name optional). It sells like any line but
-  // has no catalogue item, so it never touches inventory stock. buyPrice is 0 (no tracked cost).
+  // A misc / custom item: only a sell price is required (name optional). It sells like any line but
+  // has no catalogue item, so it never touches inventory stock. An optional buy price can be given
+  // so the line still contributes an accurate profit; it defaults to 0 (no tracked cost) if blank.
   // Quick restock straight from the billing picker (so a 0-stock item becomes sellable here).
   const quickRestock = (item) => {
     const qty = +stockQty;
@@ -1316,9 +1318,11 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const addMisc = () => {
     const price = +miscPrice;
     if (!(price > 0)) return notify("Enter a price for the misc item.");
+    const buy = +miscBuy;
+    if (miscBuy.trim() !== "" && !(buy >= 0)) return notify("Enter a valid buy price (or leave it blank).");
     const name = miscName.trim() || "Misc item";
-    setCart((cart) => [...cart, { id: "misc-" + uid(), name, icon: "🧾", unit: "pc", sellPrice: money(price), buyPrice: 0, qty: 1, misc: true }]);
-    setMiscName(""); setMiscPrice("");
+    setCart((cart) => [...cart, { id: "misc-" + uid(), name, icon: "🧾", unit: "pc", sellPrice: money(price), buyPrice: money(buy > 0 ? buy : 0), qty: 1, misc: true }]);
+    setMiscName(""); setMiscPrice(""); setMiscBuy("");
     notify(`Added “${name}” · ${INR(money(price))}`);
   };
 
@@ -1405,7 +1409,8 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
           <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, padding: "8px 10px", background: "#F4F7F4", borderRadius: 8 }}>
             <span style={{ fontSize: 11.5, fontWeight: 700, color: "#465", whiteSpace: "nowrap" }}>🧾 Misc</span>
             <input className="input" style={{ flex: 1, minWidth: 0 }} placeholder="Name (optional)" value={miscName} onChange={(e) => setMiscName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item name" />
-            <input className="input" style={{ width: 86 }} type="number" min="0" step="0.01" placeholder="₹ price" value={miscPrice} onChange={(e) => setMiscPrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item price" />
+            <input className="input" style={{ width: 78 }} type="number" min="0" step="0.01" placeholder="₹ buy" value={miscBuy} onChange={(e) => setMiscBuy(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item buy price (optional)" title="Buy / cost price (optional) — used for profit" />
+            <input className="input" style={{ width: 86 }} type="number" min="0" step="0.01" placeholder="₹ sell" value={miscPrice} onChange={(e) => setMiscPrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item sell price" />
             <button className="btn" onClick={addMisc}>+ Add</button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
