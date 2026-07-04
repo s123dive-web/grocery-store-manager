@@ -341,6 +341,42 @@ export const deadStock = (items, sales) => {
     .sort((a, b) => b.value - a.value);
 };
 
+// --- expenses (one-time capital / setup cost) -------------------------------
+
+// Total spend across the given expenses.
+export const expenseTotal = (expenses) =>
+  round2((expenses || []).reduce((a, e) => a + (Number(e.amount) || 0), 0));
+
+// One bucket per calendar month in [from, to] — capital deployed per month.
+export const expenseByMonth = (expenses, from, to) => {
+  const months = eachMonth(from, to);
+  const idx = new Map(months.map((m, i) => [m, i]));
+  const rows = months.map((m) => ({ month: m, label: monthLabel(m), amount: 0 }));
+  for (const e of expenses || []) {
+    if (!e.date) continue;
+    const i = idx.get(String(e.date).slice(0, 7));
+    if (i != null) rows[i].amount += Number(e.amount) || 0;
+  }
+  return rows.map((r) => ({ ...r, amount: round2(r.amount) }));
+};
+
+// Spend grouped by description ("where the money went"), biggest first, with %.
+export const expenseBreakdown = (expenses, { limit = 10 } = {}) => {
+  const m = new Map();
+  let total = 0;
+  for (const e of expenses || []) {
+    const name = String(e.desc || "").trim() || "Uncategorised";
+    const v = Number(e.amount) || 0;
+    total += v;
+    m.set(name, (m.get(name) || 0) + v);
+  }
+  const rows = [...m.entries()]
+    .map(([name, value]) => ({ name, value: round2(value), pct: total > 0 ? Math.round((value / total) * 100) : 0 }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, limit);
+  return { rows, total: round2(total) };
+};
+
 // --- break-even (cumulative trading profit vs total capex) ------------------
 
 // Capex is the one-time setup spend (all expenses) — a horizontal line the

@@ -6,6 +6,7 @@ import {
   filterByDateRange, summarize, withMovingAverage, dailyRevenueSeries, monthlyRevenueProfit,
   salesHeatmap, aggregateItems, topItems, paymentBreakdown, udhariEvents, udhariOutstandingSeries,
   inventoryValue, inventoryByCategory, deadStock, breakEvenSeries, breakEvenEstimate,
+  expenseTotal, expenseByMonth, expenseBreakdown,
 } from "./stats.js";
 
 const RUPEE = String.fromCharCode(0x20b9);
@@ -254,6 +255,34 @@ describe("inventory", () => {
     const dead = deadStock(items, [{ lines: [{ name: "Tea" }] }]);
     expect(dead.map((d) => d.name)).toEqual(["Salt"]); // Sugar out of stock, Tea sold
     expect(dead[0].value).toBe(50);
+  });
+});
+
+describe("expenses", () => {
+  const expenses = [
+    { date: "2026-01-15", desc: "Racks", amount: 5000 },
+    { date: "2026-01-20", desc: "Racks", amount: 2000 },
+    { date: "2026-03-02", desc: "Signboard", amount: 3000 },
+    { date: "2026-05-10", desc: "Deposit", amount: 10000 },
+  ];
+  it("expenseTotal sums everything", () => expect(expenseTotal(expenses)).toBe(20000));
+  it("expenseTotal empty is 0", () => expect(expenseTotal([])).toBe(0));
+  it("expenseByMonth buckets per month across the range, zero-filled", () => {
+    const rows = expenseByMonth(expenses, "2026-01-01", "2026-05-31");
+    expect(rows.map((r) => r.month)).toEqual(["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]);
+    expect(rows.map((r) => r.amount)).toEqual([7000, 0, 3000, 0, 10000]);
+  });
+  it("expenseBreakdown groups by desc, biggest first, with %", () => {
+    const { rows, total } = expenseBreakdown(expenses);
+    expect(total).toBe(20000);
+    expect(rows[0]).toMatchObject({ name: "Deposit", value: 10000, pct: 50 });
+    expect(rows.find((r) => r.name === "Racks")).toMatchObject({ value: 7000, pct: 35 });
+  });
+  it("expenseBreakdown labels blank desc as Uncategorised and honours limit", () => {
+    const { rows } = expenseBreakdown([{ desc: "", amount: 100 }, { amount: 50 }], { limit: 1 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].name).toBe("Uncategorised");
+    expect(rows[0].value).toBe(150);
   });
 });
 

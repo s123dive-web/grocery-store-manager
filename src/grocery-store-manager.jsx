@@ -18,6 +18,7 @@ import {
   formatINR, inrCompact, summarize, dailyRevenueSeries, monthlyRevenueProfit,
   salesHeatmap, topItems as topItemsBy, paymentBreakdown, udhariOutstandingSeries,
   inventoryValue, inventoryByCategory, deadStock, breakEvenSeries, breakEvenEstimate,
+  expenseTotal, expenseByMonth, expenseBreakdown,
   DOW, DOW_ORDER, hourLabel,
 } from "./lib/stats.js";
 
@@ -3263,7 +3264,12 @@ const renderPayTrend = (series) => (
 // Period presets for the analytics views. Finance and Stats each offer their own
 // windows; the keys are resolved to concrete date ranges by periodRange().
 const FINANCE_PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last14", "Last 14 days"], ["last30", "Last 30 days"], ["last45", "Last 45 days"], ["last2m", "Last 2 months"], ["lastQuarter", "Last quarter"], ["thisYear", "This year"], ["custom", "Custom"]];
-// Stats spans short windows through the full history ("All time" uses the oldest record date).
+// Stats spans short windows through the full history. "All time" is anchored to
+// fixed business milestones rather than the oldest data row: trading (sales) began
+// May 2026, but capital / setup spending started earlier, in Jan 2026 — so the
+// expense charts reach back further than the sales charts under "All time".
+const TRADING_START = "2026-05-01"; // sales history begins — "All time" floor for revenue/profit charts
+const CAPEX_START = "2026-01-01";   // capital/setup spending begins — "All time" floor for expense charts
 const STATS_PERIODS = [["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisMonth", "This month"], ["lastMonth", "Last month"], ["lastQuarter", "Last 3 months"], ["last6m", "Last 6 months"], ["thisYear", "This year"], ["allTime", "All time"], ["custom", "Custom"]];
 
 function Finance({ sales, expenses }) {
@@ -3412,6 +3418,8 @@ function Finance({ sales, expenses }) {
 const sectionHead = { fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em", margin: "24px 0 8px" };
 // (payment-method colours reuse the shared PAY_COLORS defined near Sales History)
 // Bar value labels (compact ₹ / plain qty) that skip zeros to keep charts clean.
+// `compactLabel` sits on top of vertical bars; the `…Right` variants end horizontal bars.
+const compactLabel = { position: "top", formatter: (v) => (v ? inrCompact(v) : ""), fontSize: 9.5, fill: "#465" };
 const compactLabelRight = { position: "right", formatter: (v) => (v ? inrCompact(v) : ""), fontSize: 9.5, fill: "#465" };
 const qtyLabelRight = { position: "right", formatter: (v) => (v ? v : ""), fontSize: 9.5, fill: "#465" };
 
@@ -3497,19 +3505,20 @@ function Stats({ sales, expenses, items }) {
   const [metric, setMetric] = useState("revenue");      // top-items sort: revenue | qty | profit
   const [includeMisc, setIncludeMisc] = useState(false); // keep Misc/SwadSutra/Sold rows in item charts?
   const [treeMetric, setTreeMetric] = useState("cost");  // treemap sizing: cost | retail
-  // Oldest record on file — lets the "All time" preset span exactly the real data.
-  const earliest = useMemo(() => {
-    let min = null;
-    for (const s of sales) if (s.date && (min == null || s.date < min)) min = s.date;
-    for (const e of expenses) if (e.date && (min == null || e.date < min)) min = e.date;
-    return min;
-  }, [sales, expenses]);
-  const { from, to, label } = periodRange(preset, cfrom, cto, earliest);
+  // "All time" for the sales charts is pinned to when trading began (TRADING_START).
+  const { from, to, label } = periodRange(preset, cfrom, cto, TRADING_START);
+  // Expenses (capital / setup cost) started before trading, so their "All time"
+  // reaches back to CAPEX_START; every other preset shares the sales window.
+  const expFrom = preset === "allTime" ? CAPEX_START : from;
 
   // Period slice drives most charts; a few (inventory, break-even, Udhari-now) are
   // "as of now" snapshots and deliberately read the full data — noted on each card.
   const pSales = useMemo(() => sales.filter((s) => s.date >= from && s.date <= to), [sales, from, to]);
+  const pExp = useMemo(() => expenses.filter((e) => e.date >= expFrom && e.date <= to), [expenses, expFrom, to]);
   const sum = useMemo(() => summarize(pSales), [pSales]);
+  const expMonthly = useMemo(() => expenseByMonth(pExp, expFrom, to), [pExp, expFrom, to]);
+  const expBreak = useMemo(() => expenseBreakdown(pExp, { limit: 10 }), [pExp]);
+  const expSum = useMemo(() => expenseTotal(pExp), [pExp]);
 
   const daily = useMemo(() => dailyRevenueSeries(pSales, from, to), [pSales, from, to]);
   const monthly = useMemo(() => monthlyRevenueProfit(pSales, from, to), [pSales, from, to]);
@@ -3700,6 +3709,45 @@ function Stats({ sales, expenses, items }) {
             {est.status === "reached" && <> You’ve recovered it (took {est.days} day(s)).</>}
             {est.status === "projected" && <> At about {formatINR(est.perDay)}/day of profit, roughly {est.daysLeft} day(s) to go.</>}
           </div>
+
+          <div style={sectionHead}>
+            Capital / setup spending
+            {preset === "allTime" && <span style={{ fontWeight: 500, color: "#8A9C90" }}> · since {new Date(CAPEX_START + "T00:00").toLocaleDateString("en-IN", { month: "short", year: "numeric" })}</span>}
+          </div>
+          {pExp.length === 0 ? (
+            <section style={S.panel}><Empty text="No capital / setup spending recorded in this period." /></section>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, color: "#3A5547", marginBottom: 8 }}>
+                One-time setup / capital of <b>{formatINR(expSum)}</b> across {pExp.length} {pExp.length === 1 ? "entry" : "entries"} — investment, not an operating cost, so it never reduces trading profit.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16 }}>
+                <ChartCard title="Capital deployed by month">
+                  <BarChart data={expMonthly} margin={{ top: 16, right: 10, left: -6, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+                    <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} />
+                    <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
+                    <Tooltip formatter={(v) => [formatINR(v), "Spent"]} />
+                    <Bar dataKey="amount" name="Spent" fill="#C44536" radius={[3, 3, 0, 0]} maxBarSize={56} label={compactLabel} />
+                  </BarChart>
+                </ChartCard>
+                <section style={S.panel}>
+                  <div style={S.panelHead}>Where it went</div>
+                  <div style={{ width: "100%", height: Math.max(200, expBreak.rows.length * 26 + 24) }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={expBreak.rows} layout="vertical" margin={{ top: 4, right: 54, left: 8, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
+                        <XAxis type="number" tick={{ fontSize: 10.5, fill: "#678" }} tickFormatter={inrCompact} />
+                        <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#465" }} width={112} interval={0} />
+                        <Tooltip formatter={(v) => formatINR(v)} />
+                        <Bar dataKey="value" name="Spent" fill="#B0762A" radius={[0, 3, 3, 0]} label={compactLabelRight} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
 
           <div style={sectionHead}>Inventory</div>
           <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
