@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   validateDailyBill, dailyOutstanding, makeDailyBill, dailyToVendorBill,
-  upsertMirror, applyVendorEditToDaily, blankDailyBill,
-  DAILY_CATEGORIES, DAILY_TO_BILL_CATEGORY, DAILY_TO_BILL_STATUS,
+  upsertMirror, applyVendorEditToDaily, blankDailyBill, itemsForCategory,
+  DAILY_CATEGORIES, DAILY_ITEMS, DAILY_TO_BILL_CATEGORY, DAILY_TO_BILL_STATUS,
 } from "./dailyBills.js";
 
 const goodForm = {
@@ -138,10 +138,45 @@ describe("DAILY_CATEGORIES", () => {
 });
 
 describe("blankDailyBill", () => {
-  it("seeds today's date and sane defaults", () => {
+  it("seeds today's date, first category, and empty item/qty", () => {
     expect(blankDailyBill("2026-07-04")).toMatchObject({
       vendorName: "", billAmount: "", paymentMethod: "Cash", paymentStatus: "Paid",
-      date: "2026-07-04", category: "Groceries",
+      date: "2026-07-04", category: DAILY_CATEGORIES[0], itemName: "", qty: "",
     });
+  });
+});
+
+describe("itemsForCategory", () => {
+  it("returns the seeded items for a category", () => {
+    expect(itemsForCategory("Water-Bottles")).toEqual(["Water Bootle - 20ltr"]);
+    expect(itemsForCategory("Dairy-Milk-Dahi")).toContain("Amul Milk - 0.5ltr");
+    expect(itemsForCategory("Dairy-Milk-Dahi")).toContain("Chitale Dahi - 400gm");
+    expect(itemsForCategory("Dairy-Milk-Dahi").length).toBe(5);
+  });
+  it("returns an empty array for a category with no seeded items", () => {
+    expect(itemsForCategory("Groceries")).toEqual([]);
+    expect(itemsForCategory("nope")).toEqual([]);
+  });
+  it("every seeded item belongs to a real category", () => {
+    for (const cat of Object.keys(DAILY_ITEMS)) expect(DAILY_CATEGORIES).toContain(cat);
+  });
+});
+
+describe("makeDailyBill item & qty", () => {
+  it("captures a trimmed item name and a positive numeric qty", () => {
+    const rec = makeDailyBill({ ...goodForm, itemName: "  Amul Milk - 0.5ltr  ", qty: "3" }, { id: "a", now: 1 });
+    expect(rec.itemName).toBe("Amul Milk - 0.5ltr");
+    expect(rec.qty).toBe(3);
+  });
+  it("normalises a blank/invalid/zero qty to 0", () => {
+    expect(makeDailyBill({ ...goodForm, qty: "" }, { id: "a", now: 1 }).qty).toBe(0);
+    expect(makeDailyBill({ ...goodForm, qty: "0" }, { id: "a", now: 1 }).qty).toBe(0);
+    expect(makeDailyBill({ ...goodForm, qty: "abc" }, { id: "a", now: 1 }).qty).toBe(0);
+  });
+  it("carries item & qty onto the vendorBills mirror (for backup preservation)", () => {
+    const rec = makeDailyBill({ ...goodForm, itemName: "Taak - 500ml", qty: "2" }, { id: "a", now: 1 });
+    const vb = dailyToVendorBill(rec);
+    expect(vb.itemName).toBe("Taak - 500ml");
+    expect(vb.qty).toBe(2);
   });
 });

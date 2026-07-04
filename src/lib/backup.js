@@ -64,9 +64,9 @@ export function exportXlsx({ items, sales, expenses, logs, vendorBills, dailyBil
     XLSX.utils.json_to_sheet(daily.length ? daily.map((b) => ({
       id: b.id, vendorName: b.vendorName, date: b.date, billAmount: b.billAmount,
       paymentMethod: b.paymentMethod || "", paymentStatus: b.paymentStatus || "", paidAmount: b.paidAmount ?? "",
-      category: b.category || "", billNumber: b.billNumber || "", notes: b.notes || "",
+      category: b.category || "", itemName: b.itemName || "", qty: b.qty ?? "", billNumber: b.billNumber || "", notes: b.notes || "",
       createdAt: b.createdAt ?? "", updatedAt: b.updatedAt ?? "",
-    })) : [{ id: "", vendorName: "", date: "", billAmount: "", paymentMethod: "", paymentStatus: "", paidAmount: "", category: "", billNumber: "", notes: "", createdAt: "", updatedAt: "" }]),
+    })) : [{ id: "", vendorName: "", date: "", billAmount: "", paymentMethod: "", paymentStatus: "", paidAmount: "", category: "", itemName: "", qty: "", billNumber: "", notes: "", createdAt: "", updatedAt: "" }]),
     "DailyBills"
   );
 
@@ -116,7 +116,7 @@ export async function importXlsx(file) {
     .map((r) => ({
       id: r.id || rid(), vendorName: String(r.vendorName || "").trim(), date: r.date, billAmount: num(r.billAmount),
       paymentMethod: r.paymentMethod || "Cash", paymentStatus: r.paymentStatus || "Paid", paidAmount: num(r.paidAmount),
-      category: r.category || "Other", billNumber: r.billNumber || "", notes: r.notes || "",
+      category: r.category || "Other", itemName: r.itemName || "", qty: num(r.qty), billNumber: r.billNumber || "", notes: r.notes || "",
       createdAt: num(r.createdAt) || "", updatedAt: num(r.updatedAt) || "", source: "daily-need",
     }));
 

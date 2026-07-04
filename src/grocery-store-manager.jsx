@@ -15,7 +15,7 @@ import { parseFile, parseRawText } from "./lib/parse.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from "./lib/bills.js";
 import {
-  PAYMENT_METHODS, PAYMENT_STATUS, DAILY_CATEGORIES,
+  PAYMENT_METHODS, PAYMENT_STATUS, DAILY_CATEGORIES, itemsForCategory,
   blankDailyBill, validateDailyBill, dailyOutstanding, makeDailyBill,
   dailyToVendorBill, upsertMirror,
 } from "./lib/dailyBills.js";
@@ -4481,10 +4481,11 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
   const startEdit = (d) => {
     setEditId(d.id);
     setForm({
+      category: d.category || DAILY_CATEGORIES[0], itemName: d.itemName || "", qty: d.qty ? String(d.qty) : "",
       vendorName: d.vendorName || "", billAmount: String(d.billAmount ?? ""),
       paymentMethod: d.paymentMethod || PAYMENT_METHODS[0], paymentStatus: d.paymentStatus || PAYMENT_STATUS[0],
       paidAmount: String(d.paidAmount ?? ""), date: d.date || todayStr(),
-      category: d.category || "Groceries", billNumber: d.billNumber || "", notes: d.notes || "",
+      billNumber: d.billNumber || "", notes: d.notes || "",
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -4505,6 +4506,13 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
     bills.forEach((b) => b.vendor && set.add(b.vendor));
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [dailyBills, bills]);
+
+  // Item suggestions are driven by the chosen category, plus any items already used under it.
+  const catItems = useMemo(() => {
+    const set = new Set(itemsForCategory(form.category));
+    dailyBills.forEach((d) => { if (d.category === form.category && d.itemName) set.add(d.itemName); });
+    return [...set];
+  }, [form.category, dailyBills]);
 
   const filtered = useMemo(() => dailyBills.filter((d) =>
     (!from || d.date >= from) && (!to || d.date <= to) &&
@@ -4573,6 +4581,19 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
         {/* add / edit form */}
         <section style={S.panel}>
           <div style={S.panelHead}>{editId ? "Edit daily-need bill" : "New daily-need bill"}</div>
+          {/* Category first — it drives the item suggestions below. Switching category clears the item. */}
+          <Field label="Category">
+            <select className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value, itemName: "" })}>
+              {DAILY_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+            </select>
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+            <Field label="Item">
+              <input className="input" list="dnb-items" value={form.itemName} onChange={(e) => setForm({ ...form, itemName: e.target.value })} placeholder={catItems.length ? "Pick or type an item…" : "Type an item…"} />
+              <datalist id="dnb-items">{catItems.map((it) => <option key={it} value={it} />)}</datalist>
+            </Field>
+            <Field label="Qty"><input className="input" type="number" min="0" step="any" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} placeholder="e.g. 3" /></Field>
+          </div>
           <Field label="Vendor name">
             <input className="input" list="dnb-vendors" value={form.vendorName} onChange={(e) => setForm({ ...form, vendorName: e.target.value })} placeholder="e.g. Amul Dairy" />
             <datalist id="dnb-vendors">{vendorSuggestions.map((v) => <option key={v} value={v} />)}</datalist>
@@ -4591,11 +4612,6 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
               </select>
             </Field>
             {form.paymentStatus === "Partial" && <Field label="Paid so far (₹)"><input className="input" type="number" min="0" step="0.01" value={form.paidAmount} onChange={(e) => setForm({ ...form, paidAmount: e.target.value })} /></Field>}
-            <Field label="Category">
-              <select className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
-                {DAILY_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-              </select>
-            </Field>
             <Field label="Bill number (optional)"><input className="input" value={form.billNumber} onChange={(e) => setForm({ ...form, billNumber: e.target.value })} placeholder="e.g. INV-204" /></Field>
           </div>
           <Field label="Notes (optional)"><textarea className="input" rows={2} style={{ resize: "vertical" }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Anything to remember…" /></Field>
@@ -4634,11 +4650,12 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
             <table className="tbl" style={{ marginTop: 12 }}>
               <thead><tr>
                 <SortTh k="date" label="Date" style={{ width: 96 }} />
+                <SortTh k="category" label="Category" />
+                <SortTh k="itemName" label="Item" />
                 <SortTh k="vendorName" label="Vendor" />
                 <SortTh k="billAmount" label="Amount" style={{ textAlign: "right" }} />
                 <SortTh k="paymentMethod" label="Method" />
                 <SortTh k="paymentStatus" label="Status" />
-                <SortTh k="category" label="Category" />
                 <th style={{ width: 78 }}></th>
               </tr></thead>
               <tbody>
@@ -4647,6 +4664,8 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
                   return (
                     <tr key={d.id}>
                       <td style={{ whiteSpace: "nowrap", color: "#677" }}>{fmtDate(d.date)}</td>
+                      <td style={{ color: "#677", fontSize: 12.5 }}>{d.category || "—"}</td>
+                      <td>{d.itemName ? <>{d.itemName}{d.qty ? <span style={{ color: "#9AA", fontWeight: 600 }}> ×{d.qty}</span> : null}</> : <span style={{ color: "#AAB" }}>—</span>}</td>
                       <td style={{ fontWeight: 600 }}>{d.vendorName}{d.billNumber ? <span style={{ color: "#9AA", fontWeight: 500, fontSize: 11.5 }}> · {d.billNumber}</span> : null}</td>
                       <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(d.billAmount)}</td>
                       <td style={{ color: "#677", fontSize: 12.5, whiteSpace: "nowrap" }}>{d.paymentMethod || "—"}</td>
@@ -4654,7 +4673,6 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
                         <span style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", color: DAILY_STATUS_COLORS[d.paymentStatus] || "#789", border: `1px solid ${DAILY_STATUS_COLORS[d.paymentStatus] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{d.paymentStatus || "—"}</span>
                         {out > 0 && <div style={{ fontSize: 10.5, color: "#C44536" }}>{INR(out)} due</div>}
                       </td>
-                      <td style={{ color: "#677", fontSize: 12.5 }}>{d.category || "—"}</td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         <button className="btn small ghost" aria-label={"Edit " + d.vendorName} onClick={() => startEdit(d)}>✎</button>{" "}
                         <button className="btn small danger" aria-label={"Delete " + d.vendorName} onClick={() => del(d)}>🗑</button>

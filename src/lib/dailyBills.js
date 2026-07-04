@@ -19,6 +19,22 @@ export const PAYMENT_METHODS = ["Cash", "UPI", "Bank Transfer", "Credit", "Chequ
 export const PAYMENT_STATUS = ["Paid", "Pending", "Partial"];
 export const DAILY_CATEGORIES = ["Water-Bottles", "Dairy-Milk-Dahi", "Bakery-BreadnAll", "Dairy", "Vegetables", "Groceries", "Packaging", "Other"];
 
+// Suggested items per category — the Item field is driven by the chosen category. This is a
+// seed catalogue; the field still accepts free text so new items can be typed without a code
+// change. Categories not listed here simply have no suggestions (free text only).
+export const DAILY_ITEMS = {
+  "Water-Bottles": ["Water Bootle - 20ltr"],
+  "Dairy-Milk-Dahi": [
+    "Amul Milk - 0.5ltr",
+    "Chitale Milk - 0.5ltr",
+    "Gokul Milk - 0.5ltr",
+    "Chitale Dahi - 400gm",
+    "Taak - 500ml",
+  ],
+};
+// Items suggested for a category (empty array when none are seeded yet).
+export const itemsForCategory = (cat) => DAILY_ITEMS[cat] || [];
+
 // A daily-need purchase is always a stock purchase from the Vendor-Bills taxonomy's point of
 // view; Packaging is the one category both taxonomies share, so it maps straight across.
 // (Any category not listed here still falls back to "Stock purchase" in dailyToVendorBill.)
@@ -39,14 +55,17 @@ export const DAILY_TO_BILL_STATUS = { Paid: "paid", Pending: "unpaid", Partial: 
 export const BILL_TO_DAILY_STATUS = { paid: "Paid", unpaid: "Pending", partial: "Partial" };
 
 // Blank form defaults. `date`/`today` are injected so this stays pure & testable.
+// Defaults to the first category so its item suggestions show immediately.
 export const blankDailyBill = (today = "") => ({
+  category: DAILY_CATEGORIES[0],
+  itemName: "",
+  qty: "",
   vendorName: "",
   billAmount: "",
   paymentMethod: PAYMENT_METHODS[0],
   paymentStatus: PAYMENT_STATUS[0],
   paidAmount: "",
   date: today,
-  category: "Groceries",
   billNumber: "",
   notes: "",
 });
@@ -78,6 +97,7 @@ export function dailyOutstanding(b) {
 export function makeDailyBill(form, { id, now, existing } = {}) {
   const amount = dailyMoney(form.billAmount);
   const status = form.paymentStatus;
+  const qtyNum = Number(form.qty);
   return {
     id,
     vendorName: String(form.vendorName || "").trim(),
@@ -88,6 +108,8 @@ export function makeDailyBill(form, { id, now, existing } = {}) {
     paidAmount: status === "Partial" ? dailyMoney(form.paidAmount || 0) : status === "Paid" ? amount : 0,
     date: form.date,
     category: form.category || "Other",
+    itemName: String(form.itemName || "").trim(),
+    qty: Number.isFinite(qtyNum) && qtyNum > 0 ? qtyNum : 0, // 0 = not specified
     billNumber: String(form.billNumber || "").trim(),
     notes: String(form.notes || "").trim(),
     createdAt: existing?.createdAt ?? now,
@@ -112,6 +134,8 @@ export function dailyToVendorBill(d) {
     source: "daily-need",
     sourceId: d.id,
     paymentMethod: d.paymentMethod,
+    itemName: d.itemName || "",
+    qty: d.qty || 0,
     billNumber: d.billNumber || "",
     notes: d.notes || "",
     createdAt: d.createdAt,
