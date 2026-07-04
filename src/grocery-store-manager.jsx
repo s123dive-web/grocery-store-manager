@@ -4293,6 +4293,14 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
   const zeroStockCount = useMemo(() => items.filter((i) => (+i.stock || 0) <= 0).length, [items]);
   const zeroPriceCount = useMemo(() => items.filter((i) => (+i.sellPrice || 0) <= 0).length, [items]);
 
+  // Items now sitting in "Other" (or with no category) whose NAME confidently maps to a real
+  // category. guessCategory is called without the items list so only the keyword map is used —
+  // no fuzzy shared-token guessing — keeping bulk re-categorization high-precision. Anything the
+  // keywords can't place stays in Other, so nothing is ever mis-filed.
+  const isOtherCat = (i) => { const c = (i.category || "").trim().toLowerCase(); return c === "" || c === "other"; };
+  const guessForOther = (i) => { const g = guessCategory(i.name); return g && g !== "Other" ? g : null; };
+  const otherFixable = useMemo(() => items.filter((i) => isOtherCat(i) && guessForOther(i)).length, [items]);
+
   const ops = [
     { key: "zeroStock", label: "Zero all stock", group: "Inventory",
       desc: "Set stock to 0 and clear every batch for all items. Names and prices are kept.",
@@ -4319,6 +4327,16 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
         return [...g.values()].map((x) => (x.length === 1 ? x[0] : mergeItemGroup(x)));
       }),
       logMsg: "Merged duplicate items", toast: "Duplicates merged" },
+    { key: "autoCat", label: "Auto-categorize “Other” items" + (otherFixable ? ` (${otherFixable})` : ""), group: "Inventory",
+      desc: "Move items now in “Other” into the category their name matches (e.g. “Bisleri Water” → Cold Drinks & Water). Only confident name matches are moved; anything unclear stays in Other. Auto icons update; custom ones are kept.",
+      disabled: otherFixable === 0,
+      apply: () => setItems((l) => l.map((i) => {
+        if (!isOtherCat(i)) return i;
+        const g = guessForOther(i);
+        if (!g) return i;
+        return { ...i, category: g, icon: isAutoIcon(i.icon, i.category) ? iconFor(g) : i.icon, updatedAt: todayStr() };
+      })),
+      logMsg: `Auto-categorized ${otherFixable} item(s) from Other`, toast: `${otherFixable} item(s) re-categorized` },
     { key: "delZeroStock", label: "Delete 0-stock items" + (zeroStockCount ? ` (${zeroStockCount})` : ""), group: "Danger zone", danger: true,
       desc: "Permanently remove every item whose stock is 0. Items that still have stock are kept.",
       disabled: zeroStockCount === 0,
