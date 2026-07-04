@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, Fragment } from "react";
 import {
   ResponsiveContainer, AreaChart, Area, BarChart, Bar, LineChart, Line,
+  ComposedChart, Treemap, ReferenceLine,
   XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
 } from "recharts";
 import JsBarcode from "jsbarcode";
@@ -13,6 +14,12 @@ import {
 import { parseFile, parseRawText } from "./lib/parse.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from "./lib/bills.js";
+import {
+  formatINR, inrCompact, summarize, dailyRevenueSeries, monthlyRevenueProfit,
+  salesHeatmap, topItems as topItemsBy, paymentBreakdown, udhariOutstandingSeries,
+  inventoryValue, inventoryByCategory, deadStock, breakEvenSeries, breakEvenEstimate,
+  DOW, DOW_ORDER, hourLabel,
+} from "./lib/stats.js";
 
 // ---------- helpers ----------
 const INR = (n) =>
@@ -3095,10 +3102,9 @@ function Logs({ logs, setLogs, notify }) {
 // ---------- Finance analytics helpers ----------
 const PIE_COLORS = ["#1B5E43", "#E8A33D", "#2A6FB0", "#C44536", "#7A5AB0", "#3DA17A", "#B0762A", "#8A9C90"];
 const inrTick = (v) => "₹" + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + "k" : v);
-// Value labels for bar charts (compact ₹). Zeros are hidden so sparse charts stay uncluttered.
-// `barLabel` sits on top of vertical bars; `barLabelRight` sits at the end of horizontal bars.
+// Value labels sitting on top of vertical bars (compact ₹). Zeros are hidden so
+// sparse charts stay uncluttered.
 const barLabel = { position: "top", formatter: (v) => (v ? inrTick(v) : ""), fontSize: 9.5, fill: "#465" };
-const barLabelRight = { position: "right", formatter: (v) => (v ? inrTick(v) : ""), fontSize: 9.5, fill: "#465" };
 
 // Resolve a period preset (+ optional custom range) to { from, to, label }.
 function periodRange(preset, cfrom, cto) {
@@ -3386,120 +3392,122 @@ function Finance({ sales, expenses }) {
 }
 
 // ---------- Stats (insights / analytics) ----------
-const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0]; // show Mon → Sun
-const sectionHead = { fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em", margin: "22px 0 8px" };
-// Pull the clock hour (0–23) out of a stored sale time like "02:15 pm (back-dated)".
-const parseHour = (t) => {
-  const m = String(t || "").match(/^(\d{1,2}):(\d{2})\s*(am|pm)/i);
-  if (!m) return null;
-  let h = (+m[1]) % 12;
-  if (/pm/i.test(m[3])) h += 12;
-  return h;
+// All the number-crunching lives in ./lib/stats.js (pure + unit-tested). This
+// component only wires those transforms to a mobile-first, date-range-driven
+// dashboard. Every inline `grid-template-columns` collapses to a single column
+// under 820px via the CSS at the bottom of this file, so the phone view stacks
+// automatically.
+const sectionHead = { fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em", margin: "24px 0 8px" };
+// (payment-method colours reuse the shared PAY_COLORS defined near Sales History)
+// Bar value labels (compact ₹ / plain qty) that skip zeros to keep charts clean.
+const compactLabelRight = { position: "right", formatter: (v) => (v ? inrCompact(v) : ""), fontSize: 9.5, fill: "#465" };
+const qtyLabelRight = { position: "right", formatter: (v) => (v ? v : ""), fontSize: 9.5, fill: "#465" };
+
+// Green ramp for the heatmap: pale mint (quiet) → deep brand green (busiest).
+const heatColor = (v, max) => {
+  if (!v || !max) return "#F4F7F4";
+  const t = Math.sqrt(Math.min(1, v / max)); // sqrt lifts the low end so small sales still register
+  const lerp = (a, b) => Math.round(a + (b - a) * t);
+  return `rgb(${lerp(224, 16)},${lerp(240, 51)},${lerp(230, 31)})`;
 };
-const hourLabel = (h) => { const hh = h % 12 || 12; return hh + (h < 12 ? "a" : "p"); };
+
+// One weekday × hour heatmap of revenue. Custom CSS grid (not Recharts) so it
+// stays tiny and scrolls horizontally on a phone instead of squashing.
+function Heatmap({ data }) {
+  if (!data || data.placed === 0 || data.minHour == null) {
+    return <Empty text="No clock-timed bills in this period to map." />;
+  }
+  const hours = [];
+  for (let h = data.minHour; h <= data.maxHour; h++) hours.push(h);
+  const cell = { width: 30, minWidth: 30, height: 26, borderRadius: 4 };
+  return (
+    <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+      <div style={{ display: "inline-block", minWidth: "100%" }}>
+        <div style={{ display: "flex", gap: 3, marginLeft: 38, marginBottom: 3 }}>
+          {hours.map((h) => (
+            <div key={h} style={{ ...cell, height: "auto", textAlign: "center", fontSize: 9.5, color: "#8A9C90", fontWeight: 600 }}>{hourLabel(h)}</div>
+          ))}
+        </div>
+        {DOW_ORDER.map((d) => (
+          <div key={d} style={{ display: "flex", gap: 3, marginBottom: 3, alignItems: "center" }}>
+            <div style={{ width: 35, minWidth: 35, fontSize: 11, color: "#465", fontWeight: 700 }}>{DOW[d]}</div>
+            {hours.map((h) => {
+              const v = data.grid[d][h];
+              return (
+                <div key={h} title={`${DOW[d]} ${hourLabel(h).replace("a", " AM").replace("p", " PM")} · ${formatINR(v)}`}
+                  style={{ ...cell, background: heatColor(v, data.max), border: "1px solid #EDF2ED", cursor: "default" }} />
+              );
+            })}
+          </div>
+        ))}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, marginLeft: 38, fontSize: 10.5, color: "#8A9C90" }}>
+          <span>Quieter</span>
+          <div style={{ display: "flex", gap: 2 }}>
+            {[0.05, 0.25, 0.5, 0.75, 1].map((t) => <div key={t} style={{ width: 16, height: 10, borderRadius: 2, background: heatColor(t, 1) }} />)}
+          </div>
+          <span>Busier — colour = revenue taken</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Treemap tile: category rectangle labelled with its stock value. Recharts feeds
+// x/y/width/height/index plus the datum fields (name, cost, retail, size).
+function TreemapTile(props) {
+  const { x, y, width, height, name, size, index } = props;
+  if (!(width > 0) || !(height > 0)) return null;
+  const fill = PIE_COLORS[(index ?? 0) % PIE_COLORS.length];
+  return (
+    <g>
+      <rect x={x} y={y} width={width} height={height} style={{ fill, stroke: "#fff", strokeWidth: 2 }} />
+      {width > 54 && height > 22 && <text x={x + 7} y={y + 16} fill="#fff" fontSize={11} fontWeight={700}>{name}</text>}
+      {width > 54 && height > 38 && <text x={x + 7} y={y + 31} fill="rgba(255,255,255,.85)" fontSize={10}>{inrCompact(size)}</text>}
+    </g>
+  );
+}
+
+// Turn a breakEvenEstimate() result into the big number + caption for its KPI card.
+function breakEvenCard(be, est) {
+  switch (est.status) {
+    case "reached": return { value: "Recovered ✓", sub: `took ${est.days} day(s) · ${be.recovered}% of capital` };
+    case "projected": return { value: "~" + est.daysLeft + " days", sub: `${be.recovered}% recovered · ${formatINR(est.perDay)}/day` };
+    case "stalled": return { value: "—", sub: "no profit trend yet" };
+    case "no-capex": return { value: "—", sub: "no setup cost logged" };
+    default: return { value: "—", sub: "need more sales data" };
+  }
+}
 
 function Stats({ sales, expenses, items }) {
   const [preset, setPreset] = useState("thisMonth");
   const [cfrom, setCfrom] = useState("");
   const [cto, setCto] = useState("");
-  const [metric, setMetric] = useState("revenue"); // top-products sort: revenue | qty | profit
+  const [metric, setMetric] = useState("revenue");      // top-items sort: revenue | qty | profit
+  const [includeMisc, setIncludeMisc] = useState(false); // keep Misc/SwadSutra/Sold rows in item charts?
+  const [treeMetric, setTreeMetric] = useState("cost");  // treemap sizing: cost | retail
   const { from, to, label } = periodRange(preset, cfrom, cto);
 
+  // Period slice drives most charts; a few (inventory, break-even, Udhari-now) are
+  // "as of now" snapshots and deliberately read the full data — noted on each card.
   const pSales = useMemo(() => sales.filter((s) => s.date >= from && s.date <= to), [sales, from, to]);
-  const pExp = useMemo(() => expenses.filter((e) => e.date >= from && e.date <= to), [expenses, from, to]);
-  const revenue = money(pSales.reduce((a, s) => a + s.total, 0));
-  const profit = money(pSales.reduce((a, s) => a + s.profit, 0));
-  const expTotal = money(pExp.reduce((a, e) => a + e.amount, 0));
-  const margin = revenue > 0 ? Math.round((profit / revenue) * 100) : 0;
+  const sum = useMemo(() => summarize(pSales), [pSales]);
 
-  // Per-date totals → weekday averages and best/worst days.
-  const { weekdayData, bestDow, avgDayRev, topDates, worstDates } = useMemo(() => {
-    const dayTotals = {};
-    pSales.forEach((s) => { const d = dayTotals[s.date] || (dayTotals[s.date] = { rev: 0, profit: 0 }); d.rev += s.total; d.profit += s.profit; });
-    const dow = Array.from({ length: 7 }, () => ({ rev: 0, profit: 0, days: 0 }));
-    Object.entries(dayTotals).forEach(([date, t]) => { const k = new Date(date + "T00:00").getDay(); dow[k].rev += t.rev; dow[k].profit += t.profit; dow[k].days += 1; });
-    const weekdayData = DOW_ORDER.map((k) => ({ name: DOW[k], revenue: money(dow[k].days ? dow[k].rev / dow[k].days : 0), profit: money(dow[k].days ? dow[k].profit / dow[k].days : 0) }));
-    const bestDow = [...weekdayData].sort((a, b) => b.revenue - a.revenue)[0];
-    const active = weekdayData.filter((w) => w.revenue > 0);
-    const avgDayRev = active.length ? money(active.reduce((a, w) => a + w.revenue, 0) / active.length) : 0;
-    const datesSorted = Object.entries(dayTotals).map(([date, t]) => ({ date, rev: money(t.rev), profit: money(t.profit) })).sort((a, b) => b.rev - a.rev);
-    return { weekdayData, bestDow, avgDayRev, topDates: datesSorted.slice(0, 5), worstDates: datesSorted.slice(-5).reverse() };
-  }, [pSales]);
+  const daily = useMemo(() => dailyRevenueSeries(pSales, from, to), [pSales, from, to]);
+  const monthly = useMemo(() => monthlyRevenueProfit(pSales, from, to), [pSales, from, to]);
+  const heat = useMemo(() => salesHeatmap(pSales), [pSales]);
+  const topProducts = useMemo(() => topItemsBy(pSales, { metric, limit: 15, includeConsolidated: includeMisc }), [pSales, metric, includeMisc]);
+  const pay = useMemo(() => paymentBreakdown(pSales), [pSales]);
+  const udhariSeries = useMemo(() => udhariOutstandingSeries(sales, from, to), [sales, from, to]);
+  const udhariNow = useMemo(() => money(sales.filter((s) => s.payment === "Udhari").reduce((a, s) => a + Math.max(0, (s.total || 0) - (s.paid || 0)), 0)), [sales]);
+  const inv = useMemo(() => inventoryValue(items), [items]);
+  const invCats = useMemo(() => inventoryByCategory(items), [items]);
+  const dead = useMemo(() => deadStock(items, pSales), [items, pSales]);
+  const be = useMemo(() => breakEvenSeries(sales, expenses), [sales, expenses]);       // all-time
+  const est = useMemo(() => breakEvenEstimate(be), [be]);
+  const beCard = breakEvenCard(be, est);
 
-  // Revenue by time of day (live clock on the bill; rows without a parseable time are skipped).
-  const { hourData, busiestHour } = useMemo(() => {
-    const agg = Array.from({ length: 24 }, () => 0);
-    pSales.forEach((s) => { const h = parseHour(s.time); if (h != null) agg[h] += s.total; });
-    const activeH = agg.map((rev, h) => ({ h, rev })).filter((x) => x.rev > 0);
-    let hourData = [];
-    if (activeH.length) {
-      const min = Math.min(...activeH.map((x) => x.h)), max = Math.max(...activeH.map((x) => x.h));
-      for (let h = min; h <= max; h++) hourData.push({ label: hourLabel(h), revenue: money(agg[h]) });
-    }
-    const busiestHour = activeH.length ? activeH.reduce((a, b) => (b.rev > a.rev ? b : a)) : null;
-    return { hourData, busiestHour };
-  }, [pSales]);
-
-  // Revenue by part of month (early / mid / late).
-  const monthPart = useMemo(() => {
-    const t = [{ name: "1–10", revenue: 0 }, { name: "11–20", revenue: 0 }, { name: "21–end", revenue: 0 }];
-    pSales.forEach((s) => { const d = +s.date.slice(8, 10); t[d <= 10 ? 0 : d <= 20 ? 1 : 2].revenue += s.total; });
-    return t.map((x) => ({ ...x, revenue: money(x.revenue) }));
-  }, [pSales]);
-
-  // Per-product aggregation (revenue / qty / profit) for top sellers.
-  const products = useMemo(() => {
-    const m = {};
-    pSales.forEach((s) => (s.lines || []).forEach((l) => {
-      const p = m[l.name] || (m[l.name] = { name: l.name, revenue: 0, qty: 0, profit: 0 });
-      p.revenue += l.amount; p.qty += l.qty; p.profit += (l.price - (l.buyPrice || 0)) * l.qty;
-    }));
-    return Object.values(m).map((p) => ({ ...p, revenue: money(p.revenue), profit: money(p.profit), qty: Math.round(p.qty * 1000) / 1000 }));
-  }, [pSales]);
-  const topProducts = useMemo(() => [...products].sort((a, b) => b[metric] - a[metric]).slice(0, 10), [products, metric]);
-
-  // Revenue by category (best-effort: match each sold line's name to its inventory category).
-  const categoryData = useMemo(() => {
-    const catOf = {};
-    items.forEach((i) => { catOf[normName(i.name)] = i.category || "Other"; });
-    const m = {};
-    pSales.forEach((s) => (s.lines || []).forEach((l) => {
-      const c = l.misc ? "Misc / custom" : (catOf[normName(l.name)] || "Uncategorized");
-      const a = m[c] || (m[c] = { name: c, revenue: 0, profit: 0 });
-      a.revenue += l.amount; a.profit += (l.price - (l.buyPrice || 0)) * l.qty;
-    }));
-    return Object.values(m).map((c) => ({ ...c, revenue: money(c.revenue), profit: money(c.profit) })).sort((a, b) => b.revenue - a.revenue).slice(0, 8);
-  }, [pSales, items]);
-
-  // Slow / dead stock: in-stock items with no sales in this period (highest stock value first).
-  const deadStock = useMemo(() => {
-    const sold = new Set();
-    pSales.forEach((s) => (s.lines || []).forEach((l) => sold.add(normName(l.name))));
-    return items.filter((i) => (i.stock || 0) > 0 && !sold.has(normName(i.name)))
-      .map((i) => ({ id: i.id, name: i.name, stock: i.stock, unit: i.unit, value: money((i.buyPrice || 0) * i.stock) }))
-      .sort((a, b) => b.value - a.value);
-  }, [pSales, items]);
-
-  // Inventory health (current snapshot, independent of the period).
-  const inv = useMemo(() => {
-    const stockCost = money(items.reduce((a, i) => a + (i.buyPrice || 0) * (i.stock || 0), 0));
-    const stockSell = money(items.reduce((a, i) => a + (i.sellPrice || 0) * (i.stock || 0), 0));
-    const lowCount = items.filter((i) => (i.stock || 0) <= (i.lowAt || 0)).length;
-    let soonQty = 0, soonVal = 0, expQty = 0, expVal = 0;
-    items.forEach((i) => (i.batches || []).forEach((b) => {
-      if (!b.expiry) return;
-      const d = Math.round((new Date(b.expiry + "T00:00") - new Date(todayStr() + "T00:00")) / 86400000);
-      const val = (i.sellPrice || 0) * (b.qty || 0);
-      if (d < 0) { expQty += b.qty; expVal += val; } else if (d <= 30) { soonQty += b.qty; soonVal += val; }
-    }));
-    const unitsSold = pSales.reduce((a, s) => a + (s.lines || []).reduce((x, l) => x + (l.misc ? 0 : l.qty), 0), 0);
-    const totalStock = items.reduce((a, i) => a + (i.stock || 0), 0);
-    return { stockCost, stockSell, lowCount, soonQty, soonVal: money(soonVal), expQty, expVal: money(expVal), turnover: totalStock ? Math.round((unitsSold / totalStock) * 100) / 100 : 0, unitsSold: Math.round(unitsSold * 100) / 100, totalStock: Math.round(totalStock * 100) / 100 };
-  }, [items, pSales]);
-
-  const fmtDate = (d) => new Date(d + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
-  const metricLabel = { revenue: "By revenue", qty: "By quantity", profit: "By profit" };
+  const treeData = useMemo(() => invCats.map((c) => ({ ...c, size: treeMetric === "retail" ? c.retail : c.cost })).filter((c) => c.size > 0), [invCats, treeMetric]);
+  const metricLabel = { revenue: "Revenue", qty: "Quantity", profit: "Profit" };
 
   return (
     <div>
@@ -3516,139 +3524,200 @@ function Stats({ sales, expenses, items }) {
         </div>
       )}
 
+      {/* ---- KPI row (first four follow the date range; last four are "as of now") ---- */}
       <div style={S.cards}>
-        <Card label="Revenue" value={INR(revenue)} sub={pSales.length + " bills"} />
-        <Card label="Net margin" value={margin + "%"} sub={`profit ${INR(profit)} · exp ${INR(expTotal)}`} accent />
-        <Card label="Best weekday" value={bestDow && bestDow.revenue > 0 ? bestDow.name : "—"} sub={bestDow && bestDow.revenue > 0 ? `avg ${INR(bestDow.revenue)}/day` : "no sales yet"} />
-        <Card label="Busiest hour" value={busiestHour ? hourLabel(busiestHour.h).replace("a", " AM").replace("p", " PM") : "—"} sub={busiestHour ? `${INR(money(busiestHour.rev))} taken` : "—"} />
+        <Card label="Revenue" value={formatINR(sum.revenue)} sub={sum.bills + " bills"} />
+        <Card label="Trading profit" value={formatINR(sum.profit)} sub={`${sum.margin}% margin`} accent />
+        <Card label="Margin" value={sum.margin + "%"} sub="profit ÷ revenue" />
+        <Card label="Avg ticket" value={formatINR(sum.avgTicket)} sub="per bill" />
+        <Card label="Udhari outstanding" value={formatINR(udhariNow)} sub="unpaid credit · now" />
+        <Card label="Inventory at cost" value={formatINR(inv.cost)} sub={`${inv.count} items · now`} />
+        <Card label="Out of stock" value={inv.outOfStock} sub="items at zero · now" />
+        <Card label="Break-even" value={beCard.value} sub={beCard.sub} />
       </div>
 
       {pSales.length === 0 ? (
-        <section style={{ ...S.panel, marginTop: 16 }}><Empty text="No sales in this period — pick a wider range to see insights." /></section>
+        <section style={{ ...S.panel, marginTop: 16 }}><Empty text="No sales in this period — pick a wider range to see the charts." /></section>
       ) : (
         <>
-          <div style={sectionHead}>Day &amp; time patterns</div>
-          {bestDow && bestDow.revenue > 0 && avgDayRev > 0 && (
-            <div style={{ fontSize: 12.5, color: "#3A5547", marginBottom: 8 }}>
-              💡 <b>{bestDow.name}</b> is usually your strongest day — about <b>{INR(bestDow.revenue)}</b> on average, {Math.round(((bestDow.revenue - avgDayRev) / avgDayRev) * 100)}% above a typical day.
-            </div>
-          )}
-          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
-            <ChartCard title="Average revenue & profit by weekday">
-              <BarChart data={weekdayData} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+          <div style={sectionHead}>Revenue over time</div>
+          <ChartCard title="Daily revenue & 7-day average" height={260}>
+            <LineChart data={daily} margin={{ top: 12, right: 10, left: -6, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+              <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: "#678" }} interval="preserveStartEnd" minTickGap={26} />
+              <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
+              <Tooltip formatter={(v, n) => [formatINR(v), n]} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Line type="monotone" dataKey="revenue" name="Daily revenue" stroke="#9BC0AC" strokeWidth={1.5} dot={false} />
+              <Line type="monotone" dataKey="ma7" name="7-day average" stroke="#1B5E43" strokeWidth={2.5} dot={false} />
+            </LineChart>
+          </ChartCard>
+
+          <div style={{ marginTop: 16 }}>
+            <ChartCard title="Monthly revenue & profit" height={250}>
+              <ComposedChart data={monthly} margin={{ top: 16, right: 10, left: -6, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#678" }} />
-                <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
-                <Tooltip formatter={(v) => INR(v)} />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} />
+                <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
+                <Tooltip formatter={(v, n) => [formatINR(v), n]} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="revenue" name="Avg revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
-                <Bar dataKey="profit" name="Avg profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
-              </BarChart>
+                <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} maxBarSize={54} />
+                <Line type="monotone" dataKey="profit" name="Profit" stroke="#E8A33D" strokeWidth={2.5} dot={{ r: 2.5, fill: "#E8A33D" }} />
+              </ComposedChart>
             </ChartCard>
+          </div>
+
+          <div style={sectionHead}>When customers shop</div>
+          <section style={S.panel}>
+            <div style={S.panelHead}>Sales heatmap — weekday × time of day</div>
+            <Heatmap data={heat} />
+          </section>
+
+          <div style={sectionHead}>Products & payment</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16 }}>
             <section style={S.panel}>
-              <div style={S.panelHead}>Best &amp; slowest days</div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#1B5E43", margin: "2px 0 4px" }}>Top days</div>
-              {topDates.map((d) => (
-                <div key={d.date} style={S.row}><span>{fmtDate(d.date)}</span><b>{INR(d.rev)}</b></div>
-              ))}
-              {worstDates.length > 0 && (
-                <>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "#C44536", margin: "10px 0 4px" }}>Slowest days</div>
-                  {worstDates.map((d) => (
-                    <div key={d.date} style={S.row}><span>{fmtDate(d.date)}</span><b>{INR(d.rev)}</b></div>
+              <div style={{ ...S.panelHead, flexWrap: "wrap", gap: 6 }}>
+                Top 15 items
+                <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                  {["revenue", "qty", "profit"].map((m) => (
+                    <button key={m} className={"btn small " + (metric === m ? "primary" : "ghost")} onClick={() => setMetric(m)}>{metricLabel[m]}</button>
                   ))}
+                </div>
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "#6B7E74", marginBottom: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={includeMisc} onChange={(e) => setIncludeMisc(e.target.checked)} />
+                Include Misc / consolidated rows (they distort real top-sellers)
+              </label>
+              {topProducts.length === 0 ? (
+                <Empty text="No individual items sold in this period." />
+              ) : (
+                <div style={{ width: "100%", height: Math.max(220, topProducts.length * 26 + 24) }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={topProducts} layout="vertical" margin={{ top: 4, right: 54, left: 8, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 10.5, fill: "#678" }} tickFormatter={metric === "qty" ? undefined : inrCompact} />
+                      <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#465" }} width={116} interval={0} />
+                      <Tooltip formatter={(v) => (metric === "qty" ? v : formatINR(v))} />
+                      <Bar dataKey={metric} name={metricLabel[metric]} fill="#3DA17A" radius={[0, 3, 3, 0]} label={metric === "qty" ? qtyLabelRight : compactLabelRight} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+
+            <section style={S.panel}>
+              <div style={S.panelHead}>How customers pay</div>
+              {pay.rows.length === 0 ? (
+                <Empty text="No sales to split." />
+              ) : (
+                <>
+                  <div style={{ position: "relative", width: "100%", height: 190 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={pay.rows} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={52} outerRadius={80} paddingAngle={2} stroke="none">
+                          {pay.rows.map((r) => <Cell key={r.name} fill={PAY_COLORS[r.name] || "#8A9C90"} />)}
+                        </Pie>
+                        <Tooltip formatter={(v, n) => [formatINR(v), n]} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    {/* Center total — a positioned overlay renders reliably across Recharts versions. */}
+                    <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", pointerEvents: "none" }}>
+                      <div style={{ textAlign: "center" }}>
+                        <div style={{ fontSize: 11, color: "#8A9C90" }}>Total</div>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: "#10331F" }}>{inrCompact(pay.total)}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    {pay.rows.map((r) => (
+                      <div key={r.name} style={S.row}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ width: 10, height: 10, borderRadius: 3, background: PAY_COLORS[r.name] || "#8A9C90" }} />{r.name}
+                        </span>
+                        <b>{formatINR(r.value)} <span style={{ color: "#8A9C90", fontWeight: 500 }}>· {r.pct}%</span></b>
+                      </div>
+                    ))}
+                  </div>
                 </>
               )}
             </section>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-            <ChartCard title="Revenue by time of day">
-              {hourData.length === 0 ? (
-                <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No clock-timed bills in this period." /></div>
-              ) : (
-                <BarChart data={hourData} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={12} />
-                  <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
-                  <Tooltip formatter={(v) => INR(v)} />
-                  <Bar dataKey="revenue" name="Revenue" fill="#2A6FB0" radius={[3, 3, 0, 0]} label={barLabel} />
-                </BarChart>
-              )}
-            </ChartCard>
-            <ChartCard title="Revenue by part of month">
-              <BarChart data={monthPart} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
+
+          <div style={sectionHead}>Credit & recovery</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <ChartCard title="Udhari outstanding over time">
+              <AreaChart data={udhariSeries} margin={{ top: 8, right: 10, left: -6, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="gUdhari" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#E8A33D" stopOpacity={0.4} /><stop offset="100%" stopColor="#E8A33D" stopOpacity={0.04} /></linearGradient>
+                </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
-                <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#678" }} />
-                <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
-                <Tooltip formatter={(v) => INR(v)} />
-                <Bar dataKey="revenue" name="Revenue" fill="#7A5AB0" radius={[3, 3, 0, 0]} label={barLabel} />
-              </BarChart>
+                <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: "#678" }} interval="preserveStartEnd" minTickGap={26} />
+                <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
+                <Tooltip formatter={(v) => [formatINR(v), "Outstanding"]} />
+                <Area type="monotone" dataKey="outstanding" name="Outstanding" stroke="#B0762A" strokeWidth={2} fill="url(#gUdhari)" />
+              </AreaChart>
+            </ChartCard>
+
+            <ChartCard title="Break-even — profit vs capital (all-time)">
+              {be.series.length === 0 ? (
+                <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No sales yet to track break-even." /></div>
+              ) : (
+                <ComposedChart data={be.series} margin={{ top: 16, right: 12, left: -6, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gBreak" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1B5E43" stopOpacity={0.35} /><stop offset="100%" stopColor="#1B5E43" stopOpacity={0.03} /></linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+                  <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: "#678" }} interval="preserveStartEnd" minTickGap={26} />
+                  <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
+                  <Tooltip formatter={(v) => [formatINR(v), "Cumulative profit"]} />
+                  <Area type="monotone" dataKey="cumProfit" name="Cumulative profit" stroke="#1B5E43" strokeWidth={2} fill="url(#gBreak)" />
+                  {be.capex > 0 && <ReferenceLine y={be.capex} stroke="#C44536" strokeDasharray="5 4" label={{ value: `Capital ${inrCompact(be.capex)}`, position: "insideTopRight", fontSize: 10, fill: "#C44536" }} />}
+                </ComposedChart>
+              )}
             </ChartCard>
           </div>
+          <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>
+            <b>Capital / Setup Cost</b> (one-time): {formatINR(be.capex)} — this is investment, never subtracted from trading profit.
+            {est.status === "reached" && <> You’ve recovered it (took {est.days} day(s)).</>}
+            {est.status === "projected" && <> At about {formatINR(est.perDay)}/day of profit, roughly {est.daysLeft} day(s) to go.</>}
+          </div>
 
-          <div style={sectionHead}>Product &amp; category</div>
-          <section style={S.panel}>
-            <div style={S.panelHead}>
-              Top sellers
-              <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                {["revenue", "qty", "profit"].map((m) => (
-                  <button key={m} className={"btn small " + (metric === m ? "primary" : "ghost")} onClick={() => setMetric(m)}>{metricLabel[m]}</button>
-                ))}
-              </div>
-            </div>
-            <table className="tbl">
-              <thead><tr><th>Item</th><th style={{ textAlign: "right" }}>Qty</th><th style={{ textAlign: "right" }}>Revenue</th><th style={{ textAlign: "right" }}>Profit</th></tr></thead>
-              <tbody>
-                {topProducts.map((p) => (
-                  <tr key={p.name}>
-                    <td>{p.name}</td>
-                    <td style={{ textAlign: "right", fontWeight: metric === "qty" ? 800 : 400 }}>{p.qty}</td>
-                    <td style={{ textAlign: "right", fontWeight: metric === "revenue" ? 800 : 400 }}>{INR(p.revenue)}</td>
-                    <td style={{ textAlign: "right", color: "#1B5E43", fontWeight: metric === "profit" ? 800 : 400 }}>{INR(p.profit)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-            <ChartCard title="Revenue by category">
-              {categoryData.length === 0 ? (
-                <div style={{ display: "grid", placeItems: "center", height: "100%" }}><Empty text="No category data." /></div>
-              ) : (
-                <BarChart data={categoryData} layout="vertical" margin={{ top: 4, right: 48, left: 8, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
-                  <XAxis type="number" tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10.5, fill: "#465" }} width={110} />
-                  <Tooltip formatter={(v) => INR(v)} />
-                  <Bar dataKey="revenue" name="Revenue" fill="#3DA17A" radius={[0, 3, 3, 0]} label={barLabelRight} />
-                </BarChart>
-              )}
-            </ChartCard>
+          <div style={sectionHead}>Inventory</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
             <section style={S.panel}>
-              <div style={S.panelHead}>Slow movers — in stock, no sales this period <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0, color: "#8A9C90", marginLeft: 8 }}>{deadStock.length}</span></div>
-              {deadStock.length === 0 ? (
+              <div style={{ ...S.panelHead, flexWrap: "wrap", gap: 6 }}>
+                Stock value by category
+                <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                  <button className={"btn small " + (treeMetric === "cost" ? "primary" : "ghost")} onClick={() => setTreeMetric("cost")}>At cost {inrCompact(inv.cost)}</button>
+                  <button className={"btn small " + (treeMetric === "retail" ? "primary" : "ghost")} onClick={() => setTreeMetric("retail")}>At retail {inrCompact(inv.retail)}</button>
+                </div>
+              </div>
+              {treeData.length === 0 ? (
+                <Empty text="No stock on hand to value." />
+              ) : (
+                <div style={{ width: "100%", height: 280 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <Treemap data={treeData} dataKey="size" nameKey="name" stroke="#fff" isAnimationActive={false} content={<TreemapTile />} />
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+            <section style={S.panel}>
+              <div style={S.panelHead}>Slow movers — in stock, no sales this period <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0, color: "#8A9C90", marginLeft: 8 }}>{dead.length}</span></div>
+              {dead.length === 0 ? (
                 <Empty text="Everything in stock sold at least once. 👍" />
               ) : (
-                deadStock.slice(0, 10).map((i) => (
-                  <div key={i.id} style={S.row}><span>{i.name} <span style={{ color: "#9AA", fontSize: 11 }}>· {i.stock} {i.unit}</span></span><b>{INR(i.value)}</b></div>
-                ))
+                <>
+                  {dead.slice(0, 10).map((i) => (
+                    <div key={i.name} style={S.row}><span>{i.name} <span style={{ color: "#9AA", fontSize: 11 }}>· {i.stock} {i.unit}</span></span><b>{formatINR(i.value)}</b></div>
+                  ))}
+                  {dead.length > 10 && <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 6 }}>+ {dead.length - 10} more…</div>}
+                </>
               )}
-              {deadStock.length > 10 && <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 6 }}>+ {deadStock.length - 10} more…</div>}
             </section>
           </div>
         </>
       )}
-
-      <div style={sectionHead}>Inventory health <span style={{ fontWeight: 500, color: "#8A9C90" }}>(current)</span></div>
-      <div style={S.cards}>
-        <Card label="Stock value (cost)" value={INR(inv.stockCost)} sub={items.length + " items"} />
-        <Card label="Stock value (sell)" value={INR(inv.stockSell)} sub="potential revenue" />
-        <Card label="Low stock" value={inv.lowCount} sub="at or below alert level" />
-        <Card label="Expiry risk" value={INR(inv.soonVal)} sub={`${inv.soonQty} unit(s) ≤30d` + (inv.expVal > 0 ? ` · ${INR(inv.expVal)} expired` : "")} />
-      </div>
-      <div style={{ fontSize: 12, color: "#6B7E74", marginTop: 8 }}>
-        Stock turnover this period: <b>{inv.turnover}×</b> ({inv.unitsSold} unit(s) sold vs {inv.totalStock} in stock now). Higher means stock moves faster.
-      </div>
     </div>
   );
 }
