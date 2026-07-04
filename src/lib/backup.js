@@ -17,7 +17,7 @@ export function exportJson(data, filename) {
 }
 
 // ---- XLSX ----
-export function exportXlsx({ items, sales, expenses, logs, vendorBills }, filename) {
+export function exportXlsx({ items, sales, expenses, logs, vendorBills, dailyBills }, filename) {
   const wb = XLSX.utils.book_new();
 
   XLSX.utils.book_append_sheet(
@@ -53,8 +53,21 @@ export function exportXlsx({ items, sales, expenses, logs, vendorBills }, filena
       id: b.id, vendor: b.vendor, date: b.date, amount: b.amount, category: b.category || "",
       status: b.status || "", paidAmount: b.paidAmount ?? "", dueDate: b.dueDate || "",
       fileName: b.fileName || "", fileURL: b.fileURL || "", filePath: b.filePath || "",
-    })) : [{ id: "", vendor: "", date: "", amount: "", category: "", status: "", paidAmount: "", dueDate: "", fileName: "", fileURL: "", filePath: "" }]),
+      source: b.source || "", // keep the "daily-need" mirror marker through an XLSX round-trip
+    })) : [{ id: "", vendor: "", date: "", amount: "", category: "", status: "", paidAmount: "", dueDate: "", fileName: "", fileURL: "", filePath: "", source: "" }]),
     "VendorBills"
+  );
+
+  const daily = dailyBills || [];
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(daily.length ? daily.map((b) => ({
+      id: b.id, vendorName: b.vendorName, date: b.date, billAmount: b.billAmount,
+      paymentMethod: b.paymentMethod || "", paymentStatus: b.paymentStatus || "", paidAmount: b.paidAmount ?? "",
+      category: b.category || "", billNumber: b.billNumber || "", notes: b.notes || "",
+      createdAt: b.createdAt ?? "", updatedAt: b.updatedAt ?? "",
+    })) : [{ id: "", vendorName: "", date: "", billAmount: "", paymentMethod: "", paymentStatus: "", paidAmount: "", category: "", billNumber: "", notes: "", createdAt: "", updatedAt: "" }]),
+    "DailyBills"
   );
 
   XLSX.writeFile(wb, filename);
@@ -95,9 +108,19 @@ export async function importXlsx(file) {
       id: r.id || rid(), vendor: String(r.vendor || "").trim(), date: r.date, amount: num(r.amount),
       category: r.category || "", status: r.status || "unpaid", paidAmount: num(r.paidAmount), dueDate: r.dueDate || "",
       fileName: r.fileName || "", fileURL: r.fileURL || "", filePath: r.filePath || "",
+      ...(r.source === "daily-need" ? { source: "daily-need", sourceId: r.sourceId || r.id } : {}),
     }));
 
-  return { items, sales, expenses, logs, vendorBills };
+  const dailyBills = sheet("DailyBills")
+    .filter((r) => String(r.vendorName || "").trim())
+    .map((r) => ({
+      id: r.id || rid(), vendorName: String(r.vendorName || "").trim(), date: r.date, billAmount: num(r.billAmount),
+      paymentMethod: r.paymentMethod || "Cash", paymentStatus: r.paymentStatus || "Paid", paidAmount: num(r.paidAmount),
+      category: r.category || "Other", billNumber: r.billNumber || "", notes: r.notes || "",
+      createdAt: num(r.createdAt) || "", updatedAt: num(r.updatedAt) || "", source: "daily-need",
+    }));
+
+  return { items, sales, expenses, logs, vendorBills, dailyBills };
 }
 
 function rid() {

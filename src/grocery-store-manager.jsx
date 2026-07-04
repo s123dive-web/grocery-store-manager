@@ -15,6 +15,11 @@ import { parseFile, parseRawText } from "./lib/parse.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from "./lib/bills.js";
 import {
+  PAYMENT_METHODS, PAYMENT_STATUS, DAILY_CATEGORIES,
+  blankDailyBill, validateDailyBill, dailyOutstanding, makeDailyBill,
+  dailyToVendorBill, upsertMirror,
+} from "./lib/dailyBills.js";
+import {
   formatINR, inrCompact, summarize, dailyRevenueSeries, monthlyRevenueProfit,
   salesHeatmap, topItems as topItemsBy, paymentBreakdown, udhariOutstandingSeries,
   inventoryValue, inventoryByCategory, deadStock, breakEvenSeries, breakEvenEstimate,
@@ -635,6 +640,7 @@ const TOP_TABS = [
   ["stats", "📊", "Stats"],
   ["udhari", "💳", "Udhari (Credit)"],
   ["expense", "⊝", "Add Expense"],
+  ["dailybills", "🧺", "Daily-Need Bills"],
 ];
 const OTHER_TABS = [
   ["alerts", "⚠", "Alerts"],
@@ -653,6 +659,7 @@ function StoreManager({ user, onLogout }) {
   const [expenses, setExpenses] = useState([]);
   const [logs, setLogs] = useState([]);
   const [bills, setBills] = useState([]); // vendor purchase bills (vendorBills slice)
+  const [dailyBills, setDailyBills] = useState([]); // daily-need vendor bills (dailyBills slice; mirrors into vendorBills)
   // Owner-added categories that have no item yet (device-local; once an item uses one it also
   // rides along in the synced items data). Merged with the built-ins + item categories below.
   const [customCats, setCustomCats] = useState(() => {
@@ -669,28 +676,28 @@ function StoreManager({ user, onLogout }) {
   // un-pushed local edits. A localStorage cache gives instant first paint and offline reads.
   // See src/lib/sync.js for the array↔map bridge.
   const CACHE_KEY = "psm-cache-v1";
-  const lastRemote = useRef({ items: {}, sales: {}, expenses: {}, logs: {}, vendorBills: {} }); // last cloud map per slice
-  const synced = useRef({ items: false, sales: false, expenses: false, logs: false, vendorBills: false });
+  const lastRemote = useRef({ items: {}, sales: {}, expenses: {}, logs: {}, vendorBills: {}, dailyBills: {} }); // last cloud map per slice
+  const synced = useRef({ items: false, sales: false, expenses: false, logs: false, vendorBills: false, dailyBills: false });
   const seeded = useRef(false);
   const [online, setOnline] = useState(true);
 
   // Always-current local state, readable from inside async listeners (for the merge).
-  const dataRef = useRef({ items, sales, expenses, logs, vendorBills: bills });
-  dataRef.current = { items, sales, expenses, logs, vendorBills: bills };
+  const dataRef = useRef({ items, sales, expenses, logs, vendorBills: bills, dailyBills });
+  dataRef.current = { items, sales, expenses, logs, vendorBills: bills, dailyBills };
   const notifyRef = useRef(null);
 
   // 1) Instant paint from the local cache.
   useEffect(() => {
     try {
       const c = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
-      if (c) { setItems(c.items || []); setSales(c.sales || []); setExpenses(c.expenses || []); setLogs(c.logs || []); setBills(c.vendorBills || []); }
+      if (c) { setItems(c.items || []); setSales(c.sales || []); setExpenses(c.expenses || []); setLogs(c.logs || []); setBills(c.vendorBills || []); setDailyBills(c.dailyBills || []); }
     } catch (e) { console.error("cache read failed", e); }
     setLoaded(true);
   }, []);
 
   // 2) Subscribe to the cloud; changes from any device flow in live.
   useEffect(() => {
-    const slices = [["items", setItems], ["sales", setSales], ["expenses", setExpenses], ["logs", setLogs], ["vendorBills", setBills]];
+    const slices = [["items", setItems], ["sales", setSales], ["expenses", setExpenses], ["logs", setLogs], ["vendorBills", setBills], ["dailyBills", setDailyBills]];
     const unsubs = slices.map(([slice, setter]) =>
       subscribeSlice(
         slice,
@@ -747,6 +754,7 @@ function StoreManager({ user, onLogout }) {
   useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("expenses", expenses), 300); return () => clearTimeout(t); }, [expenses, loaded, pushSlice]);
   useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("logs", logs), 300); return () => clearTimeout(t); }, [logs, loaded, pushSlice]);
   useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("vendorBills", bills), 300); return () => clearTimeout(t); }, [bills, loaded, pushSlice]);
+  useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("dailyBills", dailyBills), 300); return () => clearTimeout(t); }, [dailyBills, loaded, pushSlice]);
 
   // 4) Mirror to a local cache (instant next paint + offline reads + no data loss on close).
   useEffect(() => {
@@ -763,7 +771,7 @@ function StoreManager({ user, onLogout }) {
       window.removeEventListener("pagehide", writeCache);
       document.removeEventListener("visibilitychange", onHide);
     };
-  }, [items, sales, expenses, logs, bills, loaded]);
+  }, [items, sales, expenses, logs, bills, dailyBills, loaded]);
 
   const toastTimer = useRef(null);
   const notify = (msg) => {
@@ -818,7 +826,7 @@ function StoreManager({ user, onLogout }) {
   };
 
   const exportData = (fmt) => {
-    const data = { items, sales, expenses, logs, vendorBills: bills };
+    const data = { items, sales, expenses, logs, vendorBills: bills, dailyBills };
     const fname = `prakash-supermart-${todayStr()}.${fmt === "xlsx" ? "xlsx" : "json"}`;
     try {
       if (fmt === "xlsx") exportXlsx(data, fname);
@@ -845,6 +853,7 @@ function StoreManager({ user, onLogout }) {
       setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
       setLogs(Array.isArray(d.logs) ? d.logs : []);
       setBills(Array.isArray(d.vendorBills) ? d.vendorBills : []);
+      setDailyBills(Array.isArray(d.dailyBills) ? d.dailyBills : []);
       addLog("backup", `Backup restored (${ext.toUpperCase()})`);
       notify("Backup restored");
     } catch (err) {
@@ -950,7 +959,9 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "expense" ? (
           <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "vendorbills" ? (
-          <VendorBills bills={bills} setBills={setBills} online={online} notify={notify} log={addLog} />
+          <VendorBills bills={bills} setBills={setBills} setDailyBills={setDailyBills} goDailyBills={() => setTab("dailybills")} online={online} notify={notify} log={addLog} />
+        ) : tab === "dailybills" ? (
+          <DailyBills dailyBills={dailyBills} setDailyBills={setDailyBills} bills={bills} setBills={setBills} goVendorBills={() => setTab("vendorbills")} notify={notify} log={addLog} />
         ) : tab === "logs" ? (
           <Logs logs={logs} setLogs={setLogs} notify={notify} />
         ) : tab === "admin" ? (
@@ -4151,7 +4162,7 @@ const STATUS_COLORS = { paid: "#1B5E43", partial: "#B0762A", unpaid: "#C44536" }
 const isImageType = (t, name) => /^image\//i.test(t || "") || /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(name || "");
 const outstandingOf = (b) => (b.status === "paid" ? 0 : b.status === "partial" ? Math.max(0, (+b.amount || 0) - (+b.paidAmount || 0)) : (+b.amount || 0));
 
-function VendorBills({ bills, setBills, online, notify, log }) {
+function VendorBills({ bills, setBills, setDailyBills, goDailyBills, online, notify, log }) {
   const blank = { vendor: "", date: todayStr(), amount: "", category: BILL_CATEGORIES[0], status: "unpaid", paidAmount: "", dueDate: "" };
   const [form, setForm] = useState(blank);
   const [editId, setEditId] = useState(null);
@@ -4215,17 +4226,30 @@ function VendorBills({ bills, setBills, online, notify, log }) {
   };
 
   const startEdit = (b) => {
+    // Daily-need bills are authored in their own section (single source of truth); redirect the
+    // edit there so the two views can't drift.
+    if (b.source === "daily-need") {
+      notify("This bill syncs from Daily-Need Bills — edit it there.");
+      goDailyBills?.();
+      return;
+    }
     setEditId(b.id);
     setForm({ vendor: b.vendor || "", date: b.date || todayStr(), amount: String(b.amount ?? ""), category: b.category || BILL_CATEGORIES[0], status: b.status || "unpaid", paidAmount: String(b.paidAmount ?? ""), dueDate: b.dueDate || "" });
     setFile(null); if (fileRef.current) fileRef.current.value = "";
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
   const del = async (b) => {
-    if (!confirm(`Delete bill from “${b.vendor}” (${INR(b.amount)})? Its proof file will also be removed.`)) return;
+    const synced = b.source === "daily-need";
+    const msg = synced
+      ? `Delete “${b.vendor}” (${INR(b.amount)})? This also removes it from Daily-Need Bills.`
+      : `Delete bill from “${b.vendor}” (${INR(b.amount)})? Its proof file will also be removed.`;
+    if (!confirm(msg)) return;
     await deleteBillProof(b.filePath);
     setBills((list) => list.filter((x) => x.id !== b.id));
+    // Delete-from-either-side: drop the matching daily record too (linked by shared id).
+    if (synced) setDailyBills?.((list) => list.filter((x) => x.id !== b.id));
     if (editId === b.id) resetForm();
-    log("bill", `Deleted vendor bill — ${b.vendor} · ${INR(b.amount)}`);
+    log("bill", `Deleted ${synced ? "daily-need" : "vendor"} bill — ${b.vendor} · ${INR(b.amount)}`);
     notify("Bill deleted");
   };
 
@@ -4338,7 +4362,10 @@ function VendorBills({ bills, setBills, online, notify, log }) {
                   return (
                     <tr key={b.id}>
                       <td style={{ whiteSpace: "nowrap", color: "#677" }}>{fmtDate(b.date)}</td>
-                      <td style={{ fontWeight: 600 }}>{b.vendor}</td>
+                      <td style={{ fontWeight: 600 }}>
+                        {b.vendor}
+                        {b.source === "daily-need" && <span title="Synced from Daily-Need Bills" style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".03em", color: "#0E7C86", border: "1px solid #9FD3D8", background: "#EAF7F8", borderRadius: 6, padding: "0 5px", whiteSpace: "nowrap" }}>🧺 Daily-Need</span>}
+                      </td>
                       <td style={{ color: "#677", fontSize: 12.5 }}>{b.category || "—"}</td>
                       <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(b.amount)}</td>
                       <td style={{ whiteSpace: "nowrap" }}>
@@ -4393,6 +4420,292 @@ function VendorBills({ bills, setBills, online, notify, log }) {
               <Tooltip formatter={(v) => INR(v)} />
               <Bar dataKey="value" name="Spend" fill="#3DA17A" radius={[0, 3, 3, 0]} />
             </BarChart>
+          </ChartCard>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Daily-Need Bills (auto-syncs into Vendor Bills) ----------
+// Day-to-day vendor bills for daily-need purchases. Each entry is the single source of truth
+// and MIRRORS into the vendorBills slice (same id, source:"daily-need") so the Vendor Bills
+// view shows it too — no double entry. See src/lib/dailyBills.js for the pure mappers.
+const METHOD_COLORS = { Cash: "#1B5E43", UPI: "#2A6FB0", "Bank Transfer": "#7A5AB0", Credit: "#C44536", Cheque: "#B0762A" };
+const DAILY_STATUS_COLORS = { Paid: "#1B5E43", Pending: "#C44536", Partial: "#B0762A" };
+
+function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills, notify, log }) {
+  const blank = useMemo(() => blankDailyBill(todayStr()), []);
+  const [form, setForm] = useState(blank);
+  const [editId, setEditId] = useState(null);
+  const [err, setErr] = useState("");
+  // filters
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [vq, setVq] = useState("");
+  const [methodF, setMethodF] = useState("all");
+  const [statusF, setStatusF] = useState("all");
+  // sort
+  const [sortKey, setSortKey] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+
+  const resetForm = () => { setForm(blankDailyBill(todayStr())); setEditId(null); setErr(""); };
+
+  const save = () => {
+    const msg = validateDailyBill(form);
+    if (msg) { setErr(msg); return notify(msg); }
+    setErr("");
+    const id = editId || uid();
+    const now = Date.now();
+    const existing = editId ? dailyBills.find((d) => d.id === editId) : null;
+    const rec = makeDailyBill(form, { id, now, existing });
+    const mirror = dailyToVendorBill(rec);
+    if (editId) {
+      setDailyBills((list) => list.map((d) => (d.id === editId ? rec : d)));
+      setBills((list) => upsertMirror(list, mirror)); // keep the Vendor Bills mirror in lockstep
+      log("bill", `Edited daily-need bill — ${rec.vendorName} · ${INR(rec.billAmount)}`);
+      notify("Daily-need bill updated · synced to Vendor Bills");
+    } else {
+      setDailyBills((list) => [...list, rec]);
+      setBills((list) => upsertMirror(list, mirror));
+      log("bill", `Added daily-need bill — ${rec.vendorName} · ${INR(rec.billAmount)}`);
+      notify("Daily-need bill saved · synced to Vendor Bills");
+    }
+    resetForm();
+  };
+
+  const startEdit = (d) => {
+    setEditId(d.id);
+    setForm({
+      vendorName: d.vendorName || "", billAmount: String(d.billAmount ?? ""),
+      paymentMethod: d.paymentMethod || PAYMENT_METHODS[0], paymentStatus: d.paymentStatus || PAYMENT_STATUS[0],
+      paidAmount: String(d.paidAmount ?? ""), date: d.date || todayStr(),
+      category: d.category || "Groceries", billNumber: d.billNumber || "", notes: d.notes || "",
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const del = (d) => {
+    if (!confirm(`Delete daily-need bill from “${d.vendorName}” (${INR(d.billAmount)})? It will also be removed from Vendor Bills.`)) return;
+    setDailyBills((list) => list.filter((x) => x.id !== d.id));
+    setBills((list) => list.filter((x) => x.id !== d.id)); // mirror shares the id → drops both
+    if (editId === d.id) resetForm();
+    log("bill", `Deleted daily-need bill — ${d.vendorName} · ${INR(d.billAmount)}`);
+    notify("Daily-need bill deleted");
+  };
+
+  // Vendor autocomplete: names already used in daily-need OR the wider Vendor Bills list.
+  const vendorSuggestions = useMemo(() => {
+    const set = new Set();
+    dailyBills.forEach((d) => d.vendorName && set.add(d.vendorName));
+    bills.forEach((b) => b.vendor && set.add(b.vendor));
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [dailyBills, bills]);
+
+  const filtered = useMemo(() => dailyBills.filter((d) =>
+    (!from || d.date >= from) && (!to || d.date <= to) &&
+    (!vq.trim() || (d.vendorName || "").toLowerCase().includes(vq.trim().toLowerCase())) &&
+    (methodF === "all" || d.paymentMethod === methodF) &&
+    (statusF === "all" || d.paymentStatus === statusF)
+  ), [dailyBills, from, to, vq, methodF, statusF]);
+
+  const toggleSort = (k) => {
+    if (sortKey === k) setSortDir((s) => (s === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir(k === "billAmount" || k === "date" ? "desc" : "asc"); }
+  };
+  const sorted = useMemo(() => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      let av, bv;
+      if (sortKey === "billAmount") { av = +a.billAmount || 0; bv = +b.billAmount || 0; }
+      else { av = String(a[sortKey] || "").toLowerCase(); bv = String(b[sortKey] || "").toLowerCase(); }
+      if (av < bv) return -dir;
+      if (av > bv) return dir;
+      return (b.createdAt || 0) - (a.createdAt || 0); // stable newest-first tiebreak
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  const totalSpent = money(filtered.reduce((a, d) => a + (+d.billAmount || 0), 0));
+  const totalPending = money(filtered.reduce((a, d) => a + dailyOutstanding(d), 0));
+
+  const spendByDay = useMemo(() => {
+    const m = {};
+    filtered.forEach((d) => { const k = d.date; if (k) m[k] = (m[k] || 0) + (+d.billAmount || 0); });
+    return Object.entries(m).sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([k, v]) => ({ label: new Date(k + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }), amount: money(v) }));
+  }, [filtered]);
+  const topVendors = useMemo(() => {
+    const m = {};
+    filtered.forEach((d) => { const v = d.vendorName || "—"; m[v] = (m[v] || 0) + (+d.billAmount || 0); });
+    return Object.entries(m).map(([name, value]) => ({ name, value: money(value) })).sort((a, b) => b.value - a.value).slice(0, 8);
+  }, [filtered]);
+  const byMethod = useMemo(() => {
+    const m = {};
+    filtered.forEach((d) => { const k = d.paymentMethod || "—"; m[k] = (m[k] || 0) + (+d.billAmount || 0); });
+    return Object.entries(m).map(([name, value]) => ({ name, value: money(value) })).filter((r) => r.value > 0);
+  }, [filtered]);
+  const byStatus = useMemo(() => {
+    const order = { Paid: 0, Partial: 1, Pending: 2 };
+    const m = {};
+    filtered.forEach((d) => { const k = d.paymentStatus || "—"; m[k] = (m[k] || 0) + (+d.billAmount || 0); });
+    return Object.entries(m).map(([name, value]) => ({ name, value: money(value) })).filter((r) => r.value > 0)
+      .sort((a, b) => (order[a.name] ?? 9) - (order[b.name] ?? 9));
+  }, [filtered]);
+
+  const setMonth = (mv) => { if (!mv) { setFrom(""); setTo(""); return; } setFrom(mv + "-01"); const d = new Date(+mv.slice(0, 4), +mv.slice(5, 7), 0); setTo(dateStr(d)); };
+  const fmtDate = (d) => (d ? new Date(d + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—");
+  const arrow = (k) => (sortKey === k ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+  const SortTh = ({ k, label, style }) => (
+    <th style={{ cursor: "pointer", userSelect: "none", ...style }} onClick={() => toggleSort(k)} title="Click to sort">{label}{arrow(k)}</th>
+  );
+
+  return (
+    <div>
+      <Header title="Daily-Need Bills" sub="Track day-to-day vendor bills for daily-need purchases — auto-synced into Vendor Bills">
+        <span style={{ fontSize: 11.5, color: "#0E7C86" }}>🧺 Each entry also appears in Vendor Bills</span>
+      </Header>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: 16, alignItems: "start" }}>
+        {/* add / edit form */}
+        <section style={S.panel}>
+          <div style={S.panelHead}>{editId ? "Edit daily-need bill" : "New daily-need bill"}</div>
+          <Field label="Vendor name">
+            <input className="input" list="dnb-vendors" value={form.vendorName} onChange={(e) => setForm({ ...form, vendorName: e.target.value })} placeholder="e.g. Amul Dairy" />
+            <datalist id="dnb-vendors">{vendorSuggestions.map((v) => <option key={v} value={v} />)}</datalist>
+          </Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Bill date"><input className="input" type="date" max={todayStr()} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+            <Field label="Amount (₹)"><input className="input" type="number" min="0" step="0.01" value={form.billAmount} onChange={(e) => setForm({ ...form, billAmount: e.target.value })} /></Field>
+            <Field label="Payment method">
+              <select className="input" value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>
+                {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+              </select>
+            </Field>
+            <Field label="Payment status">
+              <select className="input" value={form.paymentStatus} onChange={(e) => setForm({ ...form, paymentStatus: e.target.value })}>
+                {PAYMENT_STATUS.map((s) => <option key={s}>{s}</option>)}
+              </select>
+            </Field>
+            {form.paymentStatus === "Partial" && <Field label="Paid so far (₹)"><input className="input" type="number" min="0" step="0.01" value={form.paidAmount} onChange={(e) => setForm({ ...form, paidAmount: e.target.value })} /></Field>}
+            <Field label="Category">
+              <select className="input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>
+                {DAILY_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+              </select>
+            </Field>
+            <Field label="Bill number (optional)"><input className="input" value={form.billNumber} onChange={(e) => setForm({ ...form, billNumber: e.target.value })} placeholder="e.g. INV-204" /></Field>
+          </div>
+          <Field label="Notes (optional)"><textarea className="input" rows={2} style={{ resize: "vertical" }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Anything to remember…" /></Field>
+          {err && <div style={{ fontSize: 12, color: "#C44536", background: "#FBEDEB", border: "1px solid #E2B6B0", borderRadius: 8, padding: "8px 10px", marginBottom: 10 }}>{err}</div>}
+          <button className="btn primary big" style={{ width: "100%" }} onClick={save}>{editId ? "Save changes" : "Save bill"}</button>
+          {editId && <button className="btn ghost" style={{ width: "100%", marginTop: 8 }} onClick={resetForm}>Cancel edit</button>}
+        </section>
+
+        {/* list + filters */}
+        <section style={S.panel}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+            <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={from} max={to || todayStr()} onChange={(e) => setFrom(e.target.value)} /></label>
+            <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} value={to} max={todayStr()} onChange={(e) => setTo(e.target.value)} /></label>
+            <label style={{ fontSize: 12, color: "#6B7E74" }}>Month <input type="month" className="input" style={{ width: "auto", marginLeft: 4 }} max={todayStr().slice(0, 7)} onChange={(e) => setMonth(e.target.value)} /></label>
+            <select className="input" style={{ width: "auto" }} value={methodF} onChange={(e) => setMethodF(e.target.value)}>
+              <option value="all">All methods</option>
+              {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+            </select>
+            <select className="input" style={{ width: "auto" }} value={statusF} onChange={(e) => setStatusF(e.target.value)}>
+              <option value="all">All status</option>
+              {PAYMENT_STATUS.map((s) => <option key={s}>{s}</option>)}
+            </select>
+            <input className="input" style={{ flex: 1, minWidth: 120 }} placeholder="Search vendor…" value={vq} onChange={(e) => setVq(e.target.value)} />
+            {(from || to || vq || methodF !== "all" || statusF !== "all") && <button className="btn ghost small" onClick={() => { setFrom(""); setTo(""); setVq(""); setMethodF("all"); setStatusF("all"); }}>Clear</button>}
+          </div>
+
+          <div style={S.cards}>
+            <Card label="Total spent" value={INR(totalSpent)} sub={filtered.length + (filtered.length === 1 ? " bill" : " bills")} />
+            <Card label="Pending" value={INR(totalPending)} sub="unpaid + partial" accent />
+            <Card label="Entries" value={String(filtered.length)} sub="in selected range" />
+          </div>
+
+          {sorted.length === 0 ? (
+            <Empty text={dailyBills.length === 0 ? "No daily-need bills yet. Add your first one on the left." : "No bills match these filters."} />
+          ) : (
+            <table className="tbl" style={{ marginTop: 12 }}>
+              <thead><tr>
+                <SortTh k="date" label="Date" style={{ width: 96 }} />
+                <SortTh k="vendorName" label="Vendor" />
+                <SortTh k="billAmount" label="Amount" style={{ textAlign: "right" }} />
+                <SortTh k="paymentMethod" label="Method" />
+                <SortTh k="paymentStatus" label="Status" />
+                <SortTh k="category" label="Category" />
+                <th style={{ width: 78 }}></th>
+              </tr></thead>
+              <tbody>
+                {sorted.map((d) => {
+                  const out = dailyOutstanding(d);
+                  return (
+                    <tr key={d.id}>
+                      <td style={{ whiteSpace: "nowrap", color: "#677" }}>{fmtDate(d.date)}</td>
+                      <td style={{ fontWeight: 600 }}>{d.vendorName}{d.billNumber ? <span style={{ color: "#9AA", fontWeight: 500, fontSize: 11.5 }}> · {d.billNumber}</span> : null}</td>
+                      <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(d.billAmount)}</td>
+                      <td style={{ color: "#677", fontSize: 12.5, whiteSpace: "nowrap" }}>{d.paymentMethod || "—"}</td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        <span style={{ fontSize: 10.5, fontWeight: 800, textTransform: "uppercase", color: DAILY_STATUS_COLORS[d.paymentStatus] || "#789", border: `1px solid ${DAILY_STATUS_COLORS[d.paymentStatus] || "#bbb"}`, borderRadius: 6, padding: "0 6px" }}>{d.paymentStatus || "—"}</span>
+                        {out > 0 && <div style={{ fontSize: 10.5, color: "#C44536" }}>{INR(out)} due</div>}
+                      </td>
+                      <td style={{ color: "#677", fontSize: 12.5 }}>{d.category || "—"}</td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        <button className="btn small ghost" aria-label={"Edit " + d.vendorName} onClick={() => startEdit(d)}>✎</button>{" "}
+                        <button className="btn small danger" aria-label={"Delete " + d.vendorName} onClick={() => del(d)}>🗑</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {sorted.length > 0 && goVendorBills && (
+            <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 10 }}>
+              These bills also appear in <button className="btn small ghost" style={{ padding: "2px 8px" }} onClick={goVendorBills}>Vendor Bills →</button>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {filtered.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+          <ChartCard title="Spend over time (by day)">
+            <BarChart data={spendByDay} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+              <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
+              <Tooltip formatter={(v) => INR(v)} />
+              <Bar dataKey="amount" name="Spend" fill="#0E7C86" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ChartCard>
+          <ChartCard title="Top vendors by spend">
+            <BarChart data={topVendors} layout="vertical" margin={{ top: 4, right: 12, left: 8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} />
+              <YAxis type="category" dataKey="name" tick={{ fontSize: 10.5, fill: "#465" }} width={110} />
+              <Tooltip formatter={(v) => INR(v)} />
+              <Bar dataKey="value" name="Spend" fill="#2A6FB0" radius={[0, 3, 3, 0]} />
+            </BarChart>
+          </ChartCard>
+          <ChartCard title="Payment method breakdown">
+            <PieChart>
+              <Pie data={byMethod} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={45} outerRadius={78} paddingAngle={2} stroke="none">
+                {byMethod.map((r) => <Cell key={r.name} fill={METHOD_COLORS[r.name] || "#8A9C90"} />)}
+              </Pie>
+              <Tooltip formatter={(v, n) => [INR(v), n]} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+            </PieChart>
+          </ChartCard>
+          <ChartCard title="Paid vs Pending vs Partial">
+            <PieChart>
+              <Pie data={byStatus} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={45} outerRadius={78} paddingAngle={2} stroke="none">
+                {byStatus.map((r) => <Cell key={r.name} fill={DAILY_STATUS_COLORS[r.name] || "#8A9C90"} />)}
+              </Pie>
+              <Tooltip formatter={(v, n) => [INR(v), n]} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+            </PieChart>
           </ChartCard>
         </div>
       )}
