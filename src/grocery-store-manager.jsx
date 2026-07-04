@@ -3107,7 +3107,9 @@ const inrTick = (v) => "₹" + (Math.abs(v) >= 1000 ? (v / 1000).toFixed(v % 100
 const barLabel = { position: "top", formatter: (v) => (v ? inrTick(v) : ""), fontSize: 9.5, fill: "#465" };
 
 // Resolve a period preset (+ optional custom range) to { from, to, label }.
-function periodRange(preset, cfrom, cto) {
+// `earliest` (a YYYY-MM-DD) is only consulted for the "allTime" preset — the caller
+// passes the oldest record date so "All time" spans exactly the real data.
+function periodRange(preset, cfrom, cto, earliest) {
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth();
   const som = (yy, mm) => dateStr(new Date(yy, mm, 1));
@@ -3121,7 +3123,10 @@ function periodRange(preset, cfrom, cto) {
     case "last45": { const d = new Date(); d.setDate(d.getDate() - 44); return { from: dateStr(d), to: dateStr(now), label: "Last 45 days" }; }
     // Month-based windows: new Date(y, m-N, day) rolls the year correctly and clamps overflow days.
     case "last2m": { const d = new Date(y, m - 2, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 2 months" }; }
-    case "lastQuarter": { const d = new Date(y, m - 3, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last quarter" }; }
+    case "lastQuarter": { const d = new Date(y, m - 3, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 3 months" }; }
+    case "last6m": { const d = new Date(y, m - 6, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 6 months" }; }
+    // All data on record: from the oldest entry (fallback a few years back) up to today.
+    case "allTime": return { from: earliest || dateStr(new Date(y - 5, 0, 1)), to: dateStr(now), label: "All time" };
     case "custom": return { from: cfrom || dateStr(now), to: cto || dateStr(now), label: `${cfrom || "…"} → ${cto || "…"}` };
     default: return { from: som(y, m), to: dateStr(now), label: now.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) };
   }
@@ -3250,9 +3255,11 @@ const renderPayTrend = (series) => (
 );
 
 // ---------- Finance (analytics) ----------
-const PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisYear", "This year"], ["custom", "Custom"]];
-// Finance offers a few extra longer windows; Stats keeps the base PERIODS list.
+// Period presets for the analytics views. Finance and Stats each offer their own
+// windows; the keys are resolved to concrete date ranges by periodRange().
 const FINANCE_PERIODS = [["thisMonth", "This month"], ["lastMonth", "Last month"], ["last7", "Last 7 days"], ["last14", "Last 14 days"], ["last30", "Last 30 days"], ["last45", "Last 45 days"], ["last2m", "Last 2 months"], ["lastQuarter", "Last quarter"], ["thisYear", "This year"], ["custom", "Custom"]];
+// Stats spans short windows through the full history ("All time" uses the oldest record date).
+const STATS_PERIODS = [["last7", "Last 7 days"], ["last30", "Last 30 days"], ["thisMonth", "This month"], ["lastMonth", "Last month"], ["lastQuarter", "Last 3 months"], ["last6m", "Last 6 months"], ["thisYear", "This year"], ["allTime", "All time"], ["custom", "Custom"]];
 
 function Finance({ sales, expenses }) {
   const [preset, setPreset] = useState("thisMonth");
@@ -3485,7 +3492,14 @@ function Stats({ sales, expenses, items }) {
   const [metric, setMetric] = useState("revenue");      // top-items sort: revenue | qty | profit
   const [includeMisc, setIncludeMisc] = useState(false); // keep Misc/SwadSutra/Sold rows in item charts?
   const [treeMetric, setTreeMetric] = useState("cost");  // treemap sizing: cost | retail
-  const { from, to, label } = periodRange(preset, cfrom, cto);
+  // Oldest record on file — lets the "All time" preset span exactly the real data.
+  const earliest = useMemo(() => {
+    let min = null;
+    for (const s of sales) if (s.date && (min == null || s.date < min)) min = s.date;
+    for (const e of expenses) if (e.date && (min == null || e.date < min)) min = e.date;
+    return min;
+  }, [sales, expenses]);
+  const { from, to, label } = periodRange(preset, cfrom, cto, earliest);
 
   // Period slice drives most charts; a few (inventory, break-even, Udhari-now) are
   // "as of now" snapshots and deliberately read the full data — noted on each card.
@@ -3513,7 +3527,7 @@ function Stats({ sales, expenses, items }) {
     <div>
       <Header title="Stats" sub={label}>
         <select className="input" style={{ width: "auto" }} value={preset} onChange={(e) => setPreset(e.target.value)}>
-          {PERIODS.map(([k, lbl]) => <option key={k} value={k}>{lbl}</option>)}
+          {STATS_PERIODS.map(([k, lbl]) => <option key={k} value={k}>{lbl}</option>)}
         </select>
       </Header>
 
