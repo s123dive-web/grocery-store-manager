@@ -3125,8 +3125,13 @@ function periodRange(preset, cfrom, cto, earliest) {
     case "last2m": { const d = new Date(y, m - 2, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 2 months" }; }
     case "lastQuarter": { const d = new Date(y, m - 3, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 3 months" }; }
     case "last6m": { const d = new Date(y, m - 6, now.getDate()); return { from: dateStr(d), to: dateStr(now), label: "Last 6 months" }; }
-    // All data on record: from the oldest entry (fallback a few years back) up to today.
-    case "allTime": return { from: earliest || dateStr(new Date(y - 5, 0, 1)), to: dateStr(now), label: "All time" };
+    // All data on record: from the oldest entry — i.e. when the shop's books begin —
+    // up to today. The label surfaces that start date so it's clear where "all time" begins.
+    case "allTime": {
+      const start = earliest || dateStr(new Date(y - 5, 0, 1));
+      const since = earliest ? new Date(earliest + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : null;
+      return { from: start, to: dateStr(now), label: since ? `All time · since ${since}` : "All time" };
+    }
     case "custom": return { from: cfrom || dateStr(now), to: cto || dateStr(now), label: `${cfrom || "…"} → ${cto || "…"}` };
     default: return { from: som(y, m), to: dateStr(now), label: now.toLocaleDateString("en-IN", { month: "long", year: "numeric" }) };
   }
@@ -3486,7 +3491,7 @@ function breakEvenCard(be, est) {
 }
 
 function Stats({ sales, expenses, items }) {
-  const [preset, setPreset] = useState("thisMonth");
+  const [preset, setPreset] = useState("allTime"); // default to the full history
   const [cfrom, setCfrom] = useState("");
   const [cto, setCto] = useState("");
   const [metric, setMetric] = useState("revenue");      // top-items sort: revenue | qty | profit
