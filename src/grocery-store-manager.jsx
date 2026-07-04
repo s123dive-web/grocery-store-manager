@@ -17,7 +17,7 @@ import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from 
 import {
   PAYMENT_METHODS, PAYMENT_STATUS, DAILY_CATEGORIES, itemsForCategory,
   blankDailyBill, validateDailyBill, dailyOutstanding, makeDailyBill,
-  dailyToVendorBill, upsertMirror,
+  dailyToVendorBill, upsertMirror, lineTotal,
 } from "./lib/dailyBills.js";
 import {
   formatINR, inrCompact, summarize, dailyRevenueSeries, monthlyRevenueProfit,
@@ -4481,7 +4481,7 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
   const startEdit = (d) => {
     setEditId(d.id);
     setForm({
-      category: d.category || DAILY_CATEGORIES[0], itemName: d.itemName || "", qty: d.qty ? String(d.qty) : "",
+      category: d.category || DAILY_CATEGORIES[0], itemName: d.itemName || "", qty: d.qty ? String(d.qty) : "", unitPrice: d.unitPrice ? String(d.unitPrice) : "",
       vendorName: d.vendorName || "", billAmount: String(d.billAmount ?? ""),
       paymentMethod: d.paymentMethod || PAYMENT_METHODS[0], paymentStatus: d.paymentStatus || PAYMENT_STATUS[0],
       paidAmount: String(d.paidAmount ?? ""), date: d.date || todayStr(),
@@ -4513,6 +4513,10 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
     dailyBills.forEach((d) => { if (d.category === form.category && d.itemName) set.add(d.itemName); });
     return [...set];
   }, [form.category, dailyBills]);
+
+  // When both Qty and Price are set, the total is qty × price and the Amount field auto-reflects
+  // it (read-only); otherwise the owner types the amount directly.
+  const autoTotal = lineTotal(form.qty, form.unitPrice);
 
   const filtered = useMemo(() => dailyBills.filter((d) =>
     (!from || d.date >= from) && (!to || d.date <= to) &&
@@ -4587,20 +4591,33 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
               {DAILY_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
             </select>
           </Field>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", gap: 10 }}>
             <Field label="Item">
               <input className="input" list="dnb-items" value={form.itemName} onChange={(e) => setForm({ ...form, itemName: e.target.value })} placeholder={catItems.length ? "Pick or type an item…" : "Type an item…"} />
               <datalist id="dnb-items">{catItems.map((it) => <option key={it} value={it} />)}</datalist>
             </Field>
             <Field label="Qty"><input className="input" type="number" min="0" step="any" value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} placeholder="e.g. 3" /></Field>
+            <Field label="Price (₹/qty)"><input className="input" type="number" min="0" step="0.01" value={form.unitPrice} onChange={(e) => setForm({ ...form, unitPrice: e.target.value })} placeholder="e.g. 30" /></Field>
           </div>
+          {autoTotal > 0 && (
+            <div style={{ fontSize: 12, color: "#0E7C86", background: "#EAF7F8", border: "1px solid #C5E7EA", borderRadius: 8, padding: "6px 10px", marginTop: -2, marginBottom: 10 }}>
+              Total = {form.qty} × {INR(form.unitPrice)} = <b>{INR(autoTotal)}</b> — auto-filled into Amount below.
+            </div>
+          )}
           <Field label="Vendor name">
             <input className="input" list="dnb-vendors" value={form.vendorName} onChange={(e) => setForm({ ...form, vendorName: e.target.value })} placeholder="e.g. Amul Dairy" />
             <datalist id="dnb-vendors">{vendorSuggestions.map((v) => <option key={v} value={v} />)}</datalist>
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Field label="Bill date"><input className="input" type="date" max={todayStr()} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-            <Field label="Amount (₹)"><input className="input" type="number" min="0" step="0.01" value={form.billAmount} onChange={(e) => setForm({ ...form, billAmount: e.target.value })} /></Field>
+            <Field label={autoTotal > 0 ? "Amount (₹) · auto" : "Amount (₹)"}>
+              <input className="input" type="number" min="0" step="0.01"
+                value={autoTotal > 0 ? autoTotal : form.billAmount}
+                readOnly={autoTotal > 0}
+                onChange={(e) => setForm({ ...form, billAmount: e.target.value })}
+                style={autoTotal > 0 ? { background: "#EEF5F0", color: "#23402F", fontWeight: 700 } : undefined}
+                title={autoTotal > 0 ? "Auto-calculated = Qty × Price. Clear Price or Qty to type a custom total." : undefined} />
+            </Field>
             <Field label="Payment method">
               <select className="input" value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>
                 {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
@@ -4665,7 +4682,7 @@ function DailyBills({ dailyBills, setDailyBills, bills, setBills, goVendorBills,
                     <tr key={d.id}>
                       <td style={{ whiteSpace: "nowrap", color: "#677" }}>{fmtDate(d.date)}</td>
                       <td style={{ color: "#677", fontSize: 12.5 }}>{d.category || "—"}</td>
-                      <td>{d.itemName ? <>{d.itemName}{d.qty ? <span style={{ color: "#9AA", fontWeight: 600 }}> ×{d.qty}</span> : null}</> : <span style={{ color: "#AAB" }}>—</span>}</td>
+                      <td>{d.itemName ? <>{d.itemName}{d.qty ? <span style={{ color: "#9AA", fontWeight: 600 }}> ×{d.qty}</span> : null}{d.unitPrice ? <span style={{ color: "#9AA", fontWeight: 500 }}> @{INR(d.unitPrice)}</span> : null}</> : <span style={{ color: "#AAB" }}>—</span>}</td>
                       <td style={{ fontWeight: 600 }}>{d.vendorName}{d.billNumber ? <span style={{ color: "#9AA", fontWeight: 500, fontSize: 11.5 }}> · {d.billNumber}</span> : null}</td>
                       <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(d.billAmount)}</td>
                       <td style={{ color: "#677", fontSize: 12.5, whiteSpace: "nowrap" }}>{d.paymentMethod || "—"}</td>

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   validateDailyBill, dailyOutstanding, makeDailyBill, dailyToVendorBill,
   upsertMirror, applyVendorEditToDaily, blankDailyBill, itemsForCategory,
+  lineTotal, effectiveAmount,
   DAILY_CATEGORIES, DAILY_ITEMS, DAILY_TO_BILL_CATEGORY, DAILY_TO_BILL_STATUS,
 } from "./dailyBills.js";
 
@@ -138,11 +139,50 @@ describe("DAILY_CATEGORIES", () => {
 });
 
 describe("blankDailyBill", () => {
-  it("seeds today's date, first category, and empty item/qty", () => {
+  it("seeds today's date, first category, and empty item/qty/price", () => {
     expect(blankDailyBill("2026-07-04")).toMatchObject({
       vendorName: "", billAmount: "", paymentMethod: "Cash", paymentStatus: "Paid",
-      date: "2026-07-04", category: DAILY_CATEGORIES[0], itemName: "", qty: "",
+      date: "2026-07-04", category: DAILY_CATEGORIES[0], itemName: "", qty: "", unitPrice: "",
     });
+  });
+});
+
+describe("lineTotal & effectiveAmount", () => {
+  it("multiplies qty × price when both are positive", () => {
+    expect(lineTotal(3, 30)).toBe(90);
+    expect(lineTotal("2", "45.5")).toBe(91);
+  });
+  it("is 0 unless both qty and price are positive", () => {
+    expect(lineTotal(0, 30)).toBe(0);
+    expect(lineTotal(3, 0)).toBe(0);
+    expect(lineTotal("", "")).toBe(0);
+  });
+  it("effectiveAmount prefers qty × price, else the typed amount", () => {
+    expect(effectiveAmount({ qty: "3", unitPrice: "30", billAmount: "999" })).toBe(90);
+    expect(effectiveAmount({ qty: "", unitPrice: "", billAmount: "250" })).toBe(250);
+    expect(effectiveAmount({ qty: "5", unitPrice: "", billAmount: "250" })).toBe(250);
+  });
+});
+
+describe("makeDailyBill auto-total from price × qty", () => {
+  it("stores billAmount = qty × price and keeps unitPrice", () => {
+    const rec = makeDailyBill({ ...goodForm, qty: "4", unitPrice: "25", billAmount: "999" }, { id: "a", now: 1 });
+    expect(rec.unitPrice).toBe(25);
+    expect(rec.qty).toBe(4);
+    expect(rec.billAmount).toBe(100); // 4 × 25 overrides the typed billAmount
+  });
+  it("falls back to the typed amount when price/qty aren't both set", () => {
+    const rec = makeDailyBill({ ...goodForm, qty: "4", unitPrice: "", billAmount: "500" }, { id: "a", now: 1 });
+    expect(rec.unitPrice).toBe(0);
+    expect(rec.billAmount).toBe(500);
+  });
+  it("a Paid bill's paidAmount equals the auto-computed total", () => {
+    const rec = makeDailyBill({ ...goodForm, paymentStatus: "Paid", qty: "2", unitPrice: "30" }, { id: "a", now: 1 });
+    expect(rec.billAmount).toBe(60);
+    expect(rec.paidAmount).toBe(60);
+  });
+  it("validates a price×qty bill even with a blank amount", () => {
+    expect(validateDailyBill({ ...goodForm, billAmount: "", qty: "3", unitPrice: "20" })).toBe("");
   });
 });
 

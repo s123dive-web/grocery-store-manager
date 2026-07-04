@@ -15,6 +15,18 @@ export const dailyMoney = (n) => {
   return Number.isFinite(v) ? Math.round((v + Number.EPSILON) * 100) / 100 : 0;
 };
 
+// Line total from quantity × unit price (0 unless BOTH are positive). When it applies, this is
+// the authoritative bill total, so the Amount field auto-reflects it.
+export const lineTotal = (qty, unitPrice) => {
+  const q = Number(qty), p = Number(unitPrice);
+  return q > 0 && p > 0 ? dailyMoney(q * p) : 0;
+};
+// The bill total that actually applies: qty × price when both are given, else the typed amount.
+export const effectiveAmount = (form) => {
+  const lt = lineTotal(form.qty, form.unitPrice);
+  return lt > 0 ? lt : dailyMoney(form.billAmount);
+};
+
 export const PAYMENT_METHODS = ["Cash", "UPI", "Bank Transfer", "Credit", "Cheque"];
 export const PAYMENT_STATUS = ["Paid", "Pending", "Partial"];
 export const DAILY_CATEGORIES = ["Water-Bottles", "Dairy-Milk-Dahi", "Bakery-BreadnAll", "Dairy", "Vegetables", "Groceries", "Packaging", "Other"];
@@ -60,6 +72,7 @@ export const blankDailyBill = (today = "") => ({
   category: DAILY_CATEGORIES[0],
   itemName: "",
   qty: "",
+  unitPrice: "",
   vendorName: "",
   billAmount: "",
   paymentMethod: PAYMENT_METHODS[0],
@@ -73,13 +86,14 @@ export const blankDailyBill = (today = "") => ({
 // Validate a form. Returns an error string, or "" when valid.
 export function validateDailyBill(form) {
   if (!String(form.vendorName || "").trim()) return "Vendor name is required.";
-  if (!(Number(form.billAmount) > 0)) return "Enter a bill amount greater than 0.";
+  const amount = effectiveAmount(form);
+  if (!(amount > 0)) return "Enter a bill amount greater than 0 (or set item price and qty).";
   if (!PAYMENT_METHODS.includes(form.paymentMethod)) return "Pick a valid payment method.";
   if (!PAYMENT_STATUS.includes(form.paymentStatus)) return "Pick a valid payment status.";
   if (form.paymentStatus === "Partial") {
     const paid = Number(form.paidAmount);
     if (!(paid > 0)) return "Enter how much has been paid so far.";
-    if (paid >= Number(form.billAmount)) return "Paid-so-far must be less than the bill amount for a partial bill.";
+    if (paid >= amount) return "Paid-so-far must be less than the bill amount for a partial bill.";
   }
   return "";
 }
@@ -95,13 +109,15 @@ export function dailyOutstanding(b) {
 // Build a clean daily-bill record from a form. `id`/`now` are injected by the caller.
 // `existing` (on edit) preserves createdAt.
 export function makeDailyBill(form, { id, now, existing } = {}) {
-  const amount = dailyMoney(form.billAmount);
+  const amount = effectiveAmount(form); // qty × price when both set, else the typed amount
   const status = form.paymentStatus;
   const qtyNum = Number(form.qty);
+  const priceNum = Number(form.unitPrice);
   return {
     id,
     vendorName: String(form.vendorName || "").trim(),
     billAmount: amount,
+    unitPrice: Number.isFinite(priceNum) && priceNum > 0 ? dailyMoney(priceNum) : 0, // 0 = not specified
     paymentMethod: form.paymentMethod,
     paymentStatus: status,
     // paidAmount is only meaningful for a partial bill; paid → full, pending → 0.
@@ -136,6 +152,7 @@ export function dailyToVendorBill(d) {
     paymentMethod: d.paymentMethod,
     itemName: d.itemName || "",
     qty: d.qty || 0,
+    unitPrice: d.unitPrice || 0,
     billNumber: d.billNumber || "",
     notes: d.notes || "",
     createdAt: d.createdAt,
