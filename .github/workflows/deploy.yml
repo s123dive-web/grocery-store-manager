@@ -39,7 +39,27 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      # Whichever attempt actually published wins; skipped attempts expose no output.
+      url: ${{ steps.deploy3.outputs.page_url || steps.deploy2.outputs.page_url || steps.deploy1.outputs.page_url }}
     steps:
-      - id: deployment
+      # GitHub Pages' publish API intermittently returns "Deployment failed, try again later"
+      # even when the status page shows Pages fully operational. The build is already green by
+      # here, so retry the publish up to 3× with a cooldown instead of failing the run (which
+      # previously needed a manual empty "ci: re-trigger" commit). Each attempt only runs if the
+      # previous one failed; a success short-circuits the rest.
+      - id: deploy1
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+      - if: steps.deploy1.outcome == 'failure'
+        name: Cooldown before retry 1
+        run: sleep 30
+      - id: deploy2
+        if: steps.deploy1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+      - if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
+        name: Cooldown before retry 2
+        run: sleep 60
+      - id: deploy3
+        if: steps.deploy1.outcome == 'failure' && steps.deploy2.outcome == 'failure'
         uses: actions/deploy-pages@v4
