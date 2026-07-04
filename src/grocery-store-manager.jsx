@@ -3422,6 +3422,10 @@ const sectionHead = { fontSize: 13, fontWeight: 800, color: "#10331F", letterSpa
 const compactLabel = { position: "top", formatter: (v) => (v ? inrCompact(v) : ""), fontSize: 9.5, fill: "#465" };
 const compactLabelRight = { position: "right", formatter: (v) => (v ? inrCompact(v) : ""), fontSize: 9.5, fill: "#465" };
 const qtyLabelRight = { position: "right", formatter: (v) => (v ? v : ""), fontSize: 9.5, fill: "#465" };
+// Exact full-₹ value printed on top of bars / line points (zeros hidden). Two
+// tints so a bar and its overlaid line stay distinguishable in the combo chart.
+const exactLabel = { position: "top", formatter: (v) => (v ? formatINR(v) : ""), fontSize: 9, fill: "#14432E" };
+const exactLabelGold = { position: "top", formatter: (v) => (v ? formatINR(v) : ""), fontSize: 9, fill: "#9A6410" };
 
 // Green ramp for the heatmap: pale mint (quiet) → deep brand green (busiest).
 const heatColor = (v, max) => {
@@ -3576,7 +3580,7 @@ function Stats({ sales, expenses, items }) {
               <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
               <Tooltip formatter={(v, n) => [formatINR(v), n]} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Line type="monotone" dataKey="revenue" name="Daily revenue" stroke="#9BC0AC" strokeWidth={1.5} dot={false} />
+              <Line type="monotone" dataKey="revenue" name="Daily revenue" stroke="#9BC0AC" strokeWidth={1.5} dot={false} label={exactLabel} />
               <Line type="monotone" dataKey="ma7" name="7-day average" stroke="#1B5E43" strokeWidth={2.5} dot={false} />
             </LineChart>
           </ChartCard>
@@ -3589,8 +3593,8 @@ function Stats({ sales, expenses, items }) {
                 <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrCompact} width={48} />
                 <Tooltip formatter={(v, n) => [formatINR(v), n]} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} maxBarSize={54} />
-                <Line type="monotone" dataKey="profit" name="Profit" stroke="#E8A33D" strokeWidth={2.5} dot={{ r: 2.5, fill: "#E8A33D" }} />
+                <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} maxBarSize={54} label={exactLabel} />
+                <Line type="monotone" dataKey="profit" name="Profit" stroke="#E8A33D" strokeWidth={2.5} dot={{ r: 2.5, fill: "#E8A33D" }} label={exactLabelGold} />
               </ComposedChart>
             </ChartCard>
           </div>
