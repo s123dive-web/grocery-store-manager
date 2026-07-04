@@ -603,11 +603,11 @@ const TOP_TABS = [
   ["inventory", "▦", "Inventory"],
   ["sales", "⊟", "Sales History"],
   ["finance", "∑", "Finance"],
+  ["stats", "📊", "Stats"],
   ["udhari", "💳", "Udhari (Credit)"],
   ["expense", "⊝", "Add Expense"],
 ];
 const OTHER_TABS = [
-  ["stats", "📊", "Stats"],
   ["alerts", "⚠", "Alerts"],
   ["vendorbills", "🧾", "Vendor Bills"],
   ["raw", "⇪", "Data Import"],
