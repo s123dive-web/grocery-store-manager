@@ -20,6 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # Full history (not a shallow clone) so the build-time App Change Log can read every
+        # commit from `git log`; with the default depth of 1 it would only see the tip commit.
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           # Node 24 ships npm 11, which correctly skips esbuild's foreign-platform
