@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   validateDailyBill, dailyOutstanding, makeDailyBill, dailyToVendorBill,
   upsertMirror, applyVendorEditToDaily, blankDailyBill,
-  DAILY_TO_BILL_CATEGORY, DAILY_TO_BILL_STATUS,
+  DAILY_CATEGORIES, DAILY_TO_BILL_CATEGORY, DAILY_TO_BILL_STATUS,
 } from "./dailyBills.js";
 
 const goodForm = {
@@ -122,6 +122,18 @@ describe("applyVendorEditToDaily (edit from the Vendor Bills side)", () => {
     // untouched daily-only fields survive
     expect(edited.paymentMethod).toBe("UPI");
     expect(edited.billNumber).toBe("INV-9");
+  });
+});
+
+describe("DAILY_CATEGORIES", () => {
+  it("keeps the three new categories at the top of the list", () => {
+    expect(DAILY_CATEGORIES.slice(0, 3)).toEqual(["Water-Bottles", "Dairy-Milk-Dahi", "Bakery-BreadnAll"]);
+  });
+  it("mirrors the new categories to a valid Vendor-Bills category", () => {
+    for (const c of ["Water-Bottles", "Dairy-Milk-Dahi", "Bakery-BreadnAll"]) {
+      const vb = dailyToVendorBill(makeDailyBill({ ...goodForm, category: c }, { id: "a", now: 1 }));
+      expect(vb.category).toBe("Stock purchase");
+    }
   });
 });
 

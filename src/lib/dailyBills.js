@@ -17,12 +17,16 @@ export const dailyMoney = (n) => {
 
 export const PAYMENT_METHODS = ["Cash", "UPI", "Bank Transfer", "Credit", "Cheque"];
 export const PAYMENT_STATUS = ["Paid", "Pending", "Partial"];
-export const DAILY_CATEGORIES = ["Dairy", "Vegetables", "Groceries", "Packaging", "Other"];
+export const DAILY_CATEGORIES = ["Water-Bottles", "Dairy-Milk-Dahi", "Bakery-BreadnAll", "Dairy", "Vegetables", "Groceries", "Packaging", "Other"];
 
 // A daily-need purchase is always a stock purchase from the Vendor-Bills taxonomy's point of
 // view; Packaging is the one category both taxonomies share, so it maps straight across.
+// (Any category not listed here still falls back to "Stock purchase" in dailyToVendorBill.)
 export const DAILY_TO_BILL_CATEGORY = {
   Packaging: "Packaging",
+  "Water-Bottles": "Stock purchase",
+  "Dairy-Milk-Dahi": "Stock purchase",
+  "Bakery-BreadnAll": "Stock purchase",
   Dairy: "Stock purchase",
   Vegetables: "Stock purchase",
   Groceries: "Stock purchase",
