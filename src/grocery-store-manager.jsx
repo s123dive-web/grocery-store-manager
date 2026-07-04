@@ -612,6 +612,16 @@ export default function App() {
 }
 
 // ---------- main app ----------
+// Feature flags for deprecating a section from the live UI WITHOUT deleting its
+// code. A tab listed here as `false` is dropped from the sidebar and its render
+// branch is skipped; the component and all its logic stay intact below. To bring
+// a section back, flip its flag to `true` (or remove the line).
+const FEATURES = {
+  finance: false, // deprecated 2026 — kept for a possible future revival
+};
+// A tab is shown unless a flag explicitly turns it off.
+const tabEnabled = (k) => FEATURES[k] !== false;
+
 // Top-level sidebar destinations, plus the secondary group tucked under "Other".
 // Both feed the same `tab` switch below — grouping is purely a nav-rendering concern.
 const TOP_TABS = [
@@ -859,7 +869,7 @@ function StoreManager({ user, onLogout }) {
             <div style={{ fontSize: 10.5, color: "#9DB5A8", lineHeight: 1.3 }}>{STORE.address}</div>
           </div>
         </div>
-        {TOP_TABS.map(([k, ic, label]) => (
+        {TOP_TABS.filter(([k]) => tabEnabled(k)).map(([k, ic, label]) => (
           <button key={k} className={"navbtn" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
             <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
             {k === "inventory" && lowStock.length > 0 && (
@@ -878,7 +888,7 @@ function StoreManager({ user, onLogout }) {
           <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.8 }}>{showOther ? "▾" : "▸"}</span>
           {!showOther && alertCount > 0 && <span style={S.badge}>{alertCount}</span>}
         </button>
-        {showOther && OTHER_TABS.map(([k, ic, label]) => (
+        {showOther && OTHER_TABS.filter(([k]) => tabEnabled(k)).map(([k, ic, label]) => (
           <button key={k} className={"navbtn sub" + (tab === k ? " active" : "")} onClick={() => setTab(k)}>
             <span style={{ width: 22, display: "inline-block", textAlign: "center" }}>{ic}</span> {label}
             {k === "alerts" && alertCount > 0 && (
@@ -929,7 +939,7 @@ function StoreManager({ user, onLogout }) {
           <BarcodeCreator items={items} setItems={setItems} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
           <SalesHistory sales={sales} items={items} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
-        ) : tab === "finance" ? (
+        ) : tab === "finance" && tabEnabled("finance") ? (
           <Finance sales={sales} expenses={expenses} />
         ) : tab === "stats" ? (
           <Stats sales={sales} expenses={expenses} items={items} />
