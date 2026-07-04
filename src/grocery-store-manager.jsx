@@ -106,6 +106,8 @@ function printReceipt(sale) {
     <div class="meta">${escapeHtml(STORE.address)}</div>
     <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
     <table>${rows}
+    ${sale.discount > 0 ? `<tr><td>Subtotal</td><td></td><td class="r">${INR(sale.subtotal != null ? sale.subtotal : money((sale.total || 0) + sale.discount))}</td></tr>
+    <tr><td>Discount${sale.discountPct ? " (" + sale.discountPct + "%)" : ""}</td><td></td><td class="r">−${INR(sale.discount)}</td></tr>` : ""}
     <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
     </table>
     ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
@@ -1238,6 +1240,8 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [mobile, setMobile] = useState("");
   const [paidNow, setPaidNow] = useState(""); // Udhari part-payment taken at billing time
   const [paidMode, setPaidMode] = useState("Cash"); // how that part-payment was received (UPI/Cash)
+  const [discount, setDiscount] = useState(""); // optional extra discount on the whole bill
+  const [discMode, setDiscMode] = useState("₹"); // "₹" = flat amount, "%" = percent of subtotal
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
   const [miscBuy, setMiscBuy] = useState(""); // optional cost/buy price for a misc line → feeds profit
@@ -1375,8 +1379,16 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     setQ("");
   };
 
-  const total = money(cart.reduce((a, c) => a + c.sellPrice * c.qty, 0));
-  const profit = money(cart.reduce((a, c) => a + (c.sellPrice - c.buyPrice) * c.qty, 0));
+  const subtotal = money(cart.reduce((a, c) => a + c.sellPrice * c.qty, 0));
+  const grossProfit = money(cart.reduce((a, c) => a + (c.sellPrice - c.buyPrice) * c.qty, 0));
+  // Optional whole-bill discount, entered as a flat ₹ amount or a % of the subtotal. Clamped to
+  // [0, subtotal] so a bill can never go negative; it comes straight off profit (cost is unchanged).
+  // `total`/`profit` stay the NET (post-discount) figures so revenue, udhari, stats and history all
+  // book the amount actually charged without any downstream change.
+  const discNum = Math.max(0, +discount || 0);
+  const discountAmt = discMode === "%" ? money(subtotal * Math.min(100, discNum) / 100) : Math.min(subtotal, money(discNum));
+  const total = money(subtotal - discountAmt);
+  const profit = money(grossProfit - discountAmt);
 
   const completeSale = () => {
     if (cart.length === 0) return;
@@ -1400,6 +1412,9 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       // sale time, even if the item's cost is changed (or the item deleted) later.
       lines: cart.map((c) => ({ name: c.name, qty: c.qty, unit: c.unit, price: c.sellPrice, buyPrice: c.buyPrice, amount: money(c.sellPrice * c.qty), ...(c.misc ? { misc: true } : {}) })),
       total, profit,
+      // Only recorded when a discount was actually given, so plain bills keep their exact old shape.
+      // `subtotal` is the pre-discount amount; `total` above is what the customer paid.
+      ...(discountAmt > 0 ? { subtotal, discount: discountAmt, ...(discMode === "%" ? { discountPct: money(discNum) } : {}) } : {}),
       payment: pay,
       // Customer name & mobile are optional on any bill (not just Udhari).
       ...(customer.trim() ? { customer: customer.trim() } : {}),
@@ -1414,13 +1429,14 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       return c ? removeStock(i, c.qty, saleDate) : i; // FIFO deplete batches by expiry
     }));
     setLastSale(sale);
-    log("sale", `Bill ${INR(total)} · ${cart.length} item(s) · ${pay}` + (customer.trim() ? ` (${customer.trim()})` : "") + (backDated ? ` · back-dated to ${saleDate}` : ""));
+    log("sale", `Bill ${INR(total)} · ${cart.length} item(s) · ${pay}` + (discountAmt > 0 ? ` · disc ${INR(discountAmt)}` : "") + (customer.trim() ? ` (${customer.trim()})` : "") + (backDated ? ` · back-dated to ${saleDate}` : ""));
     setCart([]);
     setQ("");
     setCustomer("");
     setMobile("");
     setPaidNow("");
     setPaidMode("Cash");
+    setDiscount("");
     searchRef.current?.focus();
     notify(`Bill saved (${pay}) — ` + INR(total));
   };
@@ -1506,6 +1522,26 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
                   <b style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{INR(c.sellPrice * c.qty)}</b>
                 </div>
               ))}
+              {/* Optional additional discount on the whole bill (₹ off, or a % of the subtotal). */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, paddingTop: 10, borderTop: "1px dashed #E0D9C4" }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "#6B7E74" }}>Additional discount</span>
+                <div style={{ display: "flex", gap: 4, marginLeft: "auto", alignItems: "center" }}>
+                  {["₹", "%"].map((m) => (
+                    <button key={m} className={"btn small " + (discMode === m ? "primary" : "ghost")} style={{ minWidth: 30 }} onClick={() => setDiscMode(m)} aria-label={m === "₹" ? "Discount in rupees" : "Discount in percent"}>{m}</button>
+                  ))}
+                  <input className="input" style={{ width: 74 }} type="number" min="0" step="0.01" max={discMode === "%" ? 100 : subtotal} placeholder="0" value={discount} onChange={(e) => setDiscount(e.target.value)} aria-label="Additional discount amount" />
+                </div>
+              </div>
+              {discountAmt > 0 && (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#6B7E74", marginTop: 8 }}>
+                    <span>Subtotal</span><span>{INR(subtotal)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#C44536", fontWeight: 600, marginTop: 2 }}>
+                    <span>Discount{discMode === "%" && discNum > 0 ? ` (${money(discNum)}%)` : ""}</span><span>−{INR(discountAmt)}</span>
+                  </div>
+                </>
+              )}
               <div style={S.rcptTotal}>
                 <span>TOTAL</span>
                 <span>{INR(total)}</span>
@@ -1573,7 +1609,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
               <button className="btn primary big" onClick={completeSale} style={{ marginTop: 12, width: "100%" }}>
                 Complete sale · {INR(total)} · {pay}
               </button>
-              <button className="btn ghost" onClick={() => setCart([])} style={{ marginTop: 8, width: "100%" }}>
+              <button className="btn ghost" onClick={() => { setCart([]); setDiscount(""); }} style={{ marginTop: 8, width: "100%" }}>
                 Clear bill
               </button>
             </>
@@ -2667,20 +2703,26 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
 
   const openEdit = (s) => setEditing({
     id: s.id, date: s.date, payment: s.payment || "UPI", paid: s.paid != null ? String(s.paid) : "", paidMode: s.paidMode || "Cash",
+    discount: s.discount != null ? String(s.discount) : "", // editable ₹ discount (a % discount is edited as its ₹ value)
     lines: s.lines.map((l) => ({ ...l })), orig: s.lines.map((l) => ({ ...l })),
   });
   const editLine = (idx, qty) => setEditing((e) => ({ ...e, lines: e.lines.map((l, i) => (i === idx ? { ...l, qty: Math.max(0, qty || 0) } : l)) }));
   const removeLine = (idx) => setEditing((e) => ({ ...e, lines: e.lines.filter((_, i) => i !== idx) }));
-  const editTotal = editing ? money(editing.lines.reduce((a, l) => a + l.price * l.qty, 0)) : 0;
+  const editSubtotal = editing ? money(editing.lines.reduce((a, l) => a + l.price * l.qty, 0)) : 0;
+  const editDiscount = editing ? Math.min(editSubtotal, Math.max(0, money(+editing.discount || 0))) : 0;
+  const editTotal = money(editSubtotal - editDiscount);
 
   const saveEdit = () => {
     const newLines = editing.lines.filter((l) => l.qty > 0).map((l) => ({ ...l, amount: money(l.price * l.qty) }));
     if (newLines.length === 0) return notify("A bill needs at least one line — use Delete instead");
-    const total = money(newLines.reduce((a, l) => a + l.amount, 0));
+    const gross = money(newLines.reduce((a, l) => a + l.amount, 0));
+    // Re-clamp any existing discount to the new subtotal, then net it off total and profit.
+    const discountAmt = Math.min(gross, Math.max(0, money(+editing.discount || 0)));
+    const total = money(gross - discountAmt);
     // Prefer the cost snapshotted on the line at sale time; fall back to the current item
     // cost only for legacy bills saved before lines carried buyPrice.
     const buyOf = (l) => (l.buyPrice != null ? +l.buyPrice : (items.find((i) => i.name.toLowerCase() === l.name.toLowerCase())?.buyPrice || 0));
-    const profit = money(newLines.reduce((a, l) => a + (l.price - buyOf(l)) * l.qty, 0));
+    const profit = money(newLines.reduce((a, l) => a + (l.price - buyOf(l)) * l.qty, 0) - discountAmt);
     const oldQ = {}, newQ = {};
     // Misc / custom lines aren't inventory-backed, so they don't drive stock reconciliation.
     editing.orig.forEach((l) => { if (l.misc) return; const k = l.name.toLowerCase(); oldQ[k] = (oldQ[k] || 0) + l.qty; });
@@ -2692,6 +2734,9 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
     setSales((all) => all.map((x) => {
       if (x.id !== editing.id) return x;
       const next = { ...x, date: editing.date || x.date, payment: editing.payment, lines: newLines, total, profit };
+      // A % discount, once edited, is stored as its plain ₹ value — drop the stale percent tag.
+      if (discountAmt > 0) { next.subtotal = gross; next.discount = discountAmt; delete next.discountPct; }
+      else { delete next.subtotal; delete next.discount; delete next.discountPct; }
       if (editing.payment === "Udhari") {
         next.paid = paid;
         if (paid > 0) next.paidMode = editing.paidMode; else delete next.paidMode;
@@ -2878,6 +2923,19 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
                       <span>{l.name} × {l.qty}</span><span>{INR(l.amount)}</span>
                     </div>
                   ))}
+                  {s.discount > 0 && (
+                    <div style={{ borderTop: "1px dashed #D8E0D8", marginTop: 4, paddingTop: 4 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "2px 0", color: "#6B7E74" }}>
+                        <span>Subtotal</span><span>{INR(s.subtotal != null ? s.subtotal : money(s.total + s.discount))}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "2px 0", color: "#C44536", fontWeight: 600 }}>
+                        <span>Discount{s.discountPct ? ` (${s.discountPct}%)` : ""}</span><span>−{INR(s.discount)}</span>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "2px 0", fontWeight: 800 }}>
+                        <span>Total</span><span>{INR(s.total)}</span>
+                      </div>
+                    </div>
+                  )}
                   <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                     <button className="btn small" onClick={() => printReceipt(s)}>🖨 Print</button>
                     <button className="btn small ghost" onClick={() => openEdit(s)}>✎ Edit bill</button>
@@ -2915,6 +2973,15 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
               ))}
             </tbody>
           </table>
+          <Field label="Additional discount (₹)">
+            <input className="input" type="number" min="0" step="0.01" max={editSubtotal} placeholder="0" value={editing.discount} onChange={(e) => setEditing({ ...editing, discount: e.target.value })} />
+          </Field>
+          {editDiscount > 0 && (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#6B7E74" }}><span>Subtotal</span><span>{INR(editSubtotal)}</span></div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#C44536", fontWeight: 600 }}><span>Discount</span><span>−{INR(editDiscount)}</span></div>
+            </>
+          )}
           <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 10 }}><span>New total</span><span>{INR(editTotal)}</span></div>
           {editing.payment === "Udhari" && (
             <div style={{ marginTop: 8 }}>
