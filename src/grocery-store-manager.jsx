@@ -1557,9 +1557,13 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
                 <span>TOTAL</span>
                 <span>{INR(total)}</span>
               </div>
-              <div style={{ fontSize: 12, color: "#1B5E43", textAlign: "right", marginTop: 2 }}>
-                Profit on this bill: {INR(profit)}
-              </div>
+              {/* Profit is hidden during billing; only surfaced as a warning when the bill would
+                  run at a loss (e.g. a discount deeper than the margin), so it can't slip by. */}
+              {profit < 0 && (
+                <div style={{ fontSize: 12, color: "#C44536", fontWeight: 700, textAlign: "right", marginTop: 2 }}>
+                  ⚠ This bill is at a loss: {INR(-profit)}
+                </div>
+              )}
               <div style={{ fontSize: 11, fontWeight: 700, color: "#6B7E74", textTransform: "uppercase", letterSpacing: ".05em", margin: "12px 0 4px" }}>Payment</div>
               <div style={{ display: "flex", gap: 6 }}>
                 {["UPI", "Cash", "Udhari"].map((p) => (
