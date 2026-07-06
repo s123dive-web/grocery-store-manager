@@ -12,7 +12,7 @@ import {
   writeSlice, overwriteSlice, subscribeSlice, subscribeConnection,
 } from "./lib/sync.js";
 import { parseFile, parseRawText } from "./lib/parse.js";
-import { itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, looksLikeBarcode } from "./lib/barcodes.js";
+import { itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, parseBarcodeText, withBarcodeSep, looksLikeBarcode } from "./lib/barcodes.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from "./lib/bills.js";
 import {
@@ -1769,10 +1769,9 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
         ? `Another item is already named “${clash.name}”.`
         : `“${clash.name}” already exists — use Restock or edit it instead.`);
     }
-    // Barcodes: parse the ";"-separated field (also tolerating commas / whitespace / newlines from
-    // scanners), de-dupe, then check uniqueness across every other product so a scanned barcode can
-    // only ever resolve to one item. The first token is the primary/default `code`.
-    const codes = cleanBarcodeList(String(f.barcodeText ?? f.code ?? "").split(/[;,\s]+/));
+    // Barcodes: parse the ";"-separated field, de-dupe, then check uniqueness across every other
+    // product so a scanned barcode can only ever resolve to one item. First token = primary `code`.
+    const codes = parseBarcodeText(f.barcodeText ?? f.code);
     const bcClash = findBarcodeClash(codes, items, f.id);
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const base = {
@@ -1825,7 +1824,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
 
   // ----- Inline row editing: make every on-screen field editable in place -----
   const startRowEdit = (i) => setRowEdit({
-    id: i.id, icon: i.icon || "", name: i.name || "", code: i.code || "",
+    id: i.id, icon: i.icon || "", name: i.name || "", barcodeText: itemBarcodes(i).join("; "),
     category: i.category || "Other", unit: i.unit || "pc",
     buyPrice: String(i.buyPrice ?? ""), sellPrice: String(i.sellPrice ?? ""),
     stock: String(i.stock ?? 0), createdAt: i.createdAt || todayStr(),
@@ -1839,8 +1838,9 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
     const nn = normName(f.name);
     const clash = items.find((i) => normName(i.name) === nn && i.id !== f.id);
     if (clash) return notify(`Another item is already named “${clash.name}”.`);
-    // Inline edit changes only the primary barcode; check it doesn't collide with another product.
-    const bcClash = findBarcodeClash([f.code], items, f.id);
+    // Multi-barcode: parse the ";"-separated field, de-dupe, and check uniqueness across products.
+    const codes = parseBarcodeText(f.barcodeText);
+    const bcClash = findBarcodeClash(codes, items, f.id);
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const newStock = Math.max(0, +f.stock || 0);
     const prevForLog = (items.find((i) => i.id === f.id)?.stock) || 0;
@@ -1852,7 +1852,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       let updated = {
         ...i,
         icon: (f.icon || "").trim() || iconFor(f.category),
-        name: f.name.trim(), code: (f.code || "").trim(),
+        name: f.name.trim(), code: codes[0] || "", barcodes: codes.slice(1),
         category: f.category, unit: f.unit,
         buyPrice: buy, sellPrice: sell, mrp: +i.mrp || sell,
         createdAt: f.createdAt || i.createdAt, updatedAt: todayStr(),
@@ -1894,7 +1894,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
 
   // ----- Quick edit: make every row directly editable at once, applied on one "Save all" -----
   const draftOf = (i) => ({
-    icon: i.icon || "", name: i.name || "", code: i.code || "",
+    icon: i.icon || "", name: i.name || "", barcodeText: itemBarcodes(i).join("; "),
     category: i.category || "Other", unit: i.unit || "pc",
     buyPrice: String(i.buyPrice ?? ""), sellPrice: String(i.sellPrice ?? ""),
     stock: String(i.stock ?? 0), createdAt: i.createdAt || todayStr(),
@@ -1917,13 +1917,13 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       if (seen.has(nn)) return notify(`Duplicate name: “${f.name.trim()}”.`);
       seen.set(nn, id);
     }
-    // Barcode uniqueness across the whole catalogue: each row's edited primary + its preserved
-    // extras (quick edit never touches the additional barcodes), plus items left out of the edit.
+    // Barcode uniqueness across the whole catalogue: each edited row's full parsed barcode list,
+    // plus the stored barcodes of items left out of the edit. No barcode may belong to two items.
     const bcOwner = new Map(); // normalized barcode → item id
     for (const it of items) {
       const f = drafts[it.id];
-      const effective = { code: f ? (f.code || "").trim() : it.code, barcodes: it.barcodes };
-      for (const b of itemBarcodes(effective)) {
+      const codes = f ? parseBarcodeText(f.barcodeText) : itemBarcodes(it);
+      for (const b of codes) {
         const k = b.toLowerCase();
         const prev = bcOwner.get(k);
         if (prev && prev !== it.id) return notify(`Barcode “${b}” is used by more than one item.`);
@@ -1933,12 +1933,13 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
     setItems((list) => list.map((i) => {
       const f = drafts[i.id];
       if (!f) return i; // items added after entering quick edit are left untouched
+      const codes = parseBarcodeText(f.barcodeText);
       const newStock = Math.max(0, +f.stock || 0);
       const diff = newStock - (i.stock || 0);
       let updated = {
         ...i,
         icon: (f.icon || "").trim() || iconFor(f.category),
-        name: f.name.trim(), code: (f.code || "").trim(),
+        name: f.name.trim(), code: codes[0] || "", barcodes: codes.slice(1),
         category: f.category, unit: f.unit,
         buyPrice: +f.buyPrice || 0, sellPrice: +f.sellPrice, mrp: +i.mrp || (+f.sellPrice),
         createdAt: f.createdAt || i.createdAt, updatedAt: todayStr(),
@@ -1961,21 +1962,15 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
   const onBarcodeKey = (e) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
-    setForm((f) => {
-      const cur = f.barcodeText || "";
-      if (!cur.trim()) return f;                        // nothing typed yet → don't add a stray ";"
-      return { ...f, barcodeText: /[;\s]$/.test(cur) ? cur : cur + "; " };
-    });
+    const cur = e.target.value; // full scanned value straight from the DOM
+    setForm((f) => ({ ...f, barcodeText: withBarcodeSep(cur) }));
   };
 
-  // Editable cells (icon/name/code, category, added date, buy, sell, margin, stock+unit) shared
+  // Editable cells (icon/name, barcodes, category, added date, buy, sell, margin, stock+unit) shared
   // by per-row Edit and Quick edit. `d` is the draft, `sf(key,val)` updates it, `actionCell` is
-  // the trailing cell (Save/Cancel for one row, empty in quick mode).
-  const renderEditRow = (i, d, sf, actionCell) => {
-    // Inline / quick edit changes only the primary barcode; count any additional ones (kept
-    // intact) to show a "+N" hint pointing the owner to ⚙ for the full multi-barcode editor.
-    const extraCount = (Array.isArray(i.barcodes) ? i.barcodes : []).filter((b) => String(b).trim()).length;
-    return (
+  // the trailing cell (Save/Cancel for one row, empty in quick mode). The barcode cell is a full
+  // multi-barcode field: a scanner's Enter appends "; " so several can be scanned into one row.
+  const renderEditRow = (d, sf, actionCell) => (
     <tr>
       <td onClick={stop}>
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -1984,10 +1979,13 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
         </div>
       </td>
       <td onClick={stop}>
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          <input className="input" style={{ padding: "6px 8px", width: 96 }} value={d.code} placeholder="barcode" onChange={(e) => sf("code", e.target.value)} aria-label="Primary barcode" />
-          {extraCount > 0 && <span style={{ fontSize: 11, color: "#8A9C90", fontWeight: 700, whiteSpace: "nowrap" }} title="Additional barcodes — edit via ⚙">+{extraCount}</span>}
-        </div>
+        <input
+          className="input" style={{ padding: "6px 8px", width: 150 }}
+          value={d.barcodeText || ""} placeholder="scan barcode(s)"
+          onChange={(e) => sf("barcodeText", e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sf("barcodeText", withBarcodeSep(e.target.value)); } }}
+          aria-label="Barcodes, separated by semicolons; first is the default"
+          title="Scan or type; Enter adds a “;” so you can scan several. The first is the default." />
       </td>
       <td onClick={stop}>
         <select className="input" style={{ padding: "6px 4px" }} value={d.category} onChange={(e) => { const c = e.target.value; sf("category", c); if (isAutoIcon(d.icon, d.category)) sf("icon", iconFor(c)); }} aria-label="Category">
@@ -2009,8 +2007,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       </td>
       {actionCell}
     </tr>
-    );
-  };
+  );
 
   return (
     <div>
@@ -2059,9 +2056,9 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
               return (
                 <Fragment key={i.id}>
                   {quickEdit && drafts[i.id] ? (
-                    renderEditRow(i, drafts[i.id], (k, v) => setDraft(i.id, k, v), <td />)
+                    renderEditRow(drafts[i.id], (k, v) => setDraft(i.id, k, v), <td />)
                   ) : rowEdit?.id === i.id ? (
-                    renderEditRow(i, rowEdit, (k, v) => setRowEdit((e) => ({ ...e, [k]: v })), (
+                    renderEditRow(rowEdit, (k, v) => setRowEdit((e) => ({ ...e, [k]: v })), (
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }} onClick={stop}>
                         <button className="btn small primary" aria-label="Save item" onClick={saveRowEdit}>✓</button>{" "}
                         <button className="btn small ghost" aria-label="Cancel edit" onClick={() => setRowEdit(null)}>✕</button>

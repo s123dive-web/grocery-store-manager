@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, looksLikeBarcode,
-  barcodeMatchKey,
+  barcodeMatchKey, parseBarcodeText, withBarcodeSep,
 } from "./barcodes.js";
 
 describe("itemBarcodes", () => {
@@ -159,6 +159,41 @@ describe("cleanBarcodeList", () => {
   it("handles empty / nullish input", () => {
     expect(cleanBarcodeList([])).toEqual([]);
     expect(cleanBarcodeList(null)).toEqual([]);
+  });
+});
+
+describe("parseBarcodeText (semicolon multi-barcode field)", () => {
+  it("splits on semicolons and trims", () => {
+    expect(parseBarcodeText("8901111; 8902222; 8903333")).toEqual(["8901111", "8902222", "8903333"]);
+  });
+  it("tolerates commas, newlines and stray whitespace from scanners", () => {
+    expect(parseBarcodeText("8901111 , 8902222\n8903333")).toEqual(["8901111", "8902222", "8903333"]);
+  });
+  it("drops empties and a trailing separator, and de-dupes case-insensitively", () => {
+    expect(parseBarcodeText("8901111; 8901111; ; PSM1; psm1; ")).toEqual(["8901111", "PSM1"]);
+  });
+  it("handles blank / nullish input", () => {
+    expect(parseBarcodeText("")).toEqual([]);
+    expect(parseBarcodeText(null)).toEqual([]);
+    expect(parseBarcodeText("   ")).toEqual([]);
+  });
+});
+
+describe("withBarcodeSep (auto-append ';' after a scan)", () => {
+  it("appends '; ' to a scanned value", () => {
+    expect(withBarcodeSep("8901234567890")).toBe("8901234567890; ");
+  });
+  it("does not double-append when already ending in a separator or space", () => {
+    expect(withBarcodeSep("8901111; ")).toBe("8901111; ");
+    expect(withBarcodeSep("8901111;")).toBe("8901111;");
+    expect(withBarcodeSep("8901111 ")).toBe("8901111 ");
+  });
+  it("leaves an empty / whitespace-only field untouched (no stray ';')", () => {
+    expect(withBarcodeSep("")).toBe("");
+    expect(withBarcodeSep("   ")).toBe("   ");
+  });
+  it("appends after a full multi-barcode list too", () => {
+    expect(withBarcodeSep("8901111; 8902222")).toBe("8901111; 8902222; ");
   });
 });
 

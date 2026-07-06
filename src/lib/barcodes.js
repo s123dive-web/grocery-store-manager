@@ -80,6 +80,20 @@ export function cleanBarcodeList(raw) {
   return out;
 }
 
+// Parse a barcode-entry field into a clean list: split on ";", commas or whitespace (so a scanner
+// burst, pasted list, or typed values all work), trim and de-dupe. The first token is the primary.
+export function parseBarcodeText(text) {
+  return cleanBarcodeList(String(text ?? "").split(/[;,\s]+/));
+}
+
+// Append a "; " separator to a barcode-entry field after a scan completes, so the next scan lands
+// after it — unless the field is empty or already ends in a separator. Used on the scanner's Enter.
+export function withBarcodeSep(val) {
+  const s = String(val ?? "");
+  if (!s.trim()) return s;
+  return /[;\s]$/.test(s) ? s : s + "; ";
+}
+
 // A query that reads like a scanned barcode rather than a typed search term: no spaces, at least
 // 6 characters, and containing a digit (product-name searches almost never are). Lets billing tell
 // a genuine "barcode not found" scan apart from an ordinary manual search that matched nothing.
