@@ -1390,20 +1390,23 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   };
 
   // Enter fires from a barcode scanner (types the value then sends Enter) or a manual search.
-  // 1) Exact barcode match across ALL items → add/increment (this is the scan path).
-  // 2) Otherwise a manual search that matched something → add the top result (unchanged).
-  // 3) A barcode-shaped query that resolved to nothing → "Item not found" modal.
-  // A hit clears the input and keeps it focused so the next scan is ready. A miss clears the
-  // input and opens the modal (which takes focus); dismissing the modal returns focus to the input.
+  // 1) Exact barcode match across ALL items → add/increment (the scan path).
+  // 2) A barcode-shaped value with no exact match → "No item found" modal (don't guess).
+  // 3) A typed search that matched something → add the top result (manual flow, unchanged).
+  // 4) Anything else that matched nothing → "No item found" modal too.
+  // The value is read from the input's DOM node (not the `q` state) so a fast keyboard-wedge
+  // burst is captured in full even if React hasn't re-rendered for the final characters yet.
+  // A hit clears the input and keeps it focused for the next scan; a miss opens the modal (which
+  // takes focus) and returns focus to the input when dismissed.
   const onSearchKey = (e) => {
     if (e.key !== "Enter") return;
-    const raw = q.trim();
+    const raw = String(e.target.value ?? q).trim();
     if (!raw) return;
     const hit = findItemByBarcode(items, raw);
     if (hit) { add(hit); setQ(""); searchRef.current?.focus(); return; }        // known barcode → add / increment qty
+    if (looksLikeBarcode(raw)) { setQ(""); setNotFound(raw); return; }          // unmatched scan → not-found modal
     if (results.length > 0) { add(results[0]); setQ(""); searchRef.current?.focus(); return; } // manual search → top match
-    if (looksLikeBarcode(raw)) { setQ(""); setNotFound(raw); return; }          // unknown scan → not-found modal
-    // A short/typed query with no match: leave it as-is (unchanged manual behavior).
+    setQ(""); setNotFound(raw);                                                 // typed query, nothing matched → modal
   };
 
   const subtotal = money(cart.reduce((a, c) => a + c.sellPrice * c.qty, 0));
@@ -1649,11 +1652,11 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       </div>
 
       {notFound != null && (
-        <Modal title="Item not found" onClose={() => { setNotFound(null); searchRef.current?.focus(); }}>
+        <Modal title="No item found" onClose={() => { setNotFound(null); searchRef.current?.focus(); }}>
           <div style={{ fontSize: 14, color: "#465", lineHeight: 1.6 }}>
-            No product has this barcode:
+            No item in your inventory matches:
             <div style={{ margin: "10px 0", fontFamily: "monospace", fontSize: 16, fontWeight: 800, textAlign: "center", background: "#F4F7F4", padding: "10px 12px", borderRadius: 8, wordBreak: "break-all" }}>{notFound}</div>
-            Add it from <b>Inventory</b> with this barcode, then it will scan here.
+            Add it from <b>Inventory</b> (with this barcode) so it scans here next time.
           </div>
           <button className="btn primary big" autoFocus style={{ width: "100%", marginTop: 14 }} onClick={() => { setNotFound(null); searchRef.current?.focus(); }}>OK</button>
         </Modal>
@@ -1755,9 +1758,10 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
         ? `Another item is already named “${clash.name}”.`
         : `“${clash.name}” already exists — use Restock or edit it instead.`);
     }
-    // Barcodes: primary field + any additional ones, de-duped, then checked for uniqueness across
-    // every other product so a scanned barcode can only ever resolve to one item.
-    const codes = cleanBarcodeList([f.code, ...(Array.isArray(f.barcodes) ? f.barcodes : [])]);
+    // Barcodes: parse the ";"-separated field (also tolerating commas / whitespace / newlines from
+    // scanners), de-dupe, then check uniqueness across every other product so a scanned barcode can
+    // only ever resolve to one item. The first token is the primary/default `code`.
+    const codes = cleanBarcodeList(String(f.barcodeText ?? f.code ?? "").split(/[;,\s]+/));
     const bcClash = findBarcodeClash(codes, items, f.id);
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const base = {
@@ -1939,15 +1943,19 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
 
   const stop = (e) => e.stopPropagation();
 
-  // ----- Add/Edit modal: multi-barcode list (primary `code` + additional `barcodes[]`) -----
-  // A fresh scan/append focuses the newly added row so a wedge scanner can fire several in a row.
-  const focusNewBarcode = useRef(false);
-  const addBarcodeRow = () => { focusNewBarcode.current = true; setForm((f) => ({ ...f, barcodes: [...(f.barcodes || []), ""] })); };
-  const setBarcodeAt = (idx, v) => setForm((f) => ({ ...f, barcodes: (f.barcodes || []).map((x, i) => (i === idx ? v : x)) }));
-  const removeBarcodeAt = (idx) => setForm((f) => ({ ...f, barcodes: (f.barcodes || []).filter((_, i) => i !== idx) }));
-  // A scanner ends its burst with Enter; here that must NOT save the form — it commits the value
-  // and opens a fresh row for the next scan instead.
-  const onBarcodeKey = (e) => { if (e.key === "Enter") { e.preventDefault(); addBarcodeRow(); } };
+  // ----- Add/Edit modal: multi-barcode entry (one ";"-separated field; first token = default) -----
+  // A scanner ends each barcode with Enter; that must NOT save the form. Instead it appends a "; "
+  // separator so the next scan lands after it — letting the cashier scan any number of barcodes
+  // (10, 20, …) into the one field in a row. `code` + `barcodes[]` are parsed from it on save.
+  const onBarcodeKey = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    setForm((f) => {
+      const cur = f.barcodeText || "";
+      if (!cur.trim()) return f;                        // nothing typed yet → don't add a stray ";"
+      return { ...f, barcodeText: /[;\s]$/.test(cur) ? cur : cur + "; " };
+    });
+  };
 
   // Editable cells (icon/name/code, category, added date, buy, sell, margin, stock+unit) shared
   // by per-row Edit and Quick edit. `d` is the draft, `sf(key,val)` updates it, `actionCell` is
@@ -2005,7 +2013,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
           <>
             {onAddCategory && <><button className="btn ghost" onClick={() => onAddCategory()} title="Create a new category you can assign to items">＋ New category</button>{" "}</>}
             <button className="btn ghost" onClick={enterQuick} disabled={items.length === 0} title="Edit every row's fields directly, then save once">✎ Quick edit</button>{" "}
-            <button className="btn primary" onClick={() => setForm({ ...blankItem })}>+ Add item</button>
+            <button className="btn primary" onClick={() => setForm({ ...blankItem, barcodeText: "" })}>+ Add item</button>
           </>
         )}
       </Header>
@@ -2073,7 +2081,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn small" onClick={(e) => { stop(e); setRestock({ id: i.id, name: i.name, qty: "", expiry: "" }); }}>Restock</button>{" "}
                       <button className="btn small ghost" onClick={(e) => { stop(e); startRowEdit(i); }}>Edit</button>{" "}
-                      <button className="btn small ghost" title="More fields (MRP, barcodes, low-stock alert, dated stock)" aria-label={"More fields for " + i.name} onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", barcodes: Array.isArray(i.barcodes) ? [...i.barcodes] : [], expiry: "" }); }}>⚙</button>{" "}
+                      <button className="btn small ghost" title="More fields (MRP, barcodes, low-stock alert, dated stock)" aria-label={"More fields for " + i.name} onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", barcodeText: itemBarcodes(i).join("; "), expiry: "" }); }}>⚙</button>{" "}
                       <button className="btn small danger" aria-label={"Delete " + i.name} onClick={(e) => { stop(e); del(i); }}>✕</button>
                     </td>
                   </tr>
@@ -2156,22 +2164,18 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
             });
           }} placeholder="e.g. Amul Butter 100g" /></Field>
           <Field label="Barcodes (optional)">
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} onKeyDown={onBarcodeKey} placeholder="Scan or type the default barcode" aria-label="Default barcode" />
-                <span style={{ fontSize: 11, color: "#8A9C90", whiteSpace: "nowrap", minWidth: 44, textAlign: "right" }}>default</span>
-              </div>
-              {(form.barcodes || []).map((b, idx) => (
-                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    className="input"
-                    ref={idx === (form.barcodes || []).length - 1 ? (el) => { if (el && focusNewBarcode.current) { el.focus(); focusNewBarcode.current = false; } } : undefined}
-                    value={b} onChange={(e) => setBarcodeAt(idx, e.target.value)} onKeyDown={onBarcodeKey}
-                    placeholder="Additional barcode" aria-label={"Additional barcode " + (idx + 1)} />
-                  <button type="button" className="btn small ghost" style={{ minWidth: 44 }} aria-label={"Remove barcode " + (idx + 1)} onClick={() => removeBarcodeAt(idx)}>✕</button>
-                </div>
-              ))}
-              <button type="button" className="btn small ghost" style={{ alignSelf: "flex-start" }} onClick={addBarcodeRow}>＋ Add another barcode</button>
+            <textarea
+              className="input"
+              rows={2}
+              value={form.barcodeText || ""}
+              onChange={(e) => setForm({ ...form, barcodeText: e.target.value })}
+              onKeyDown={onBarcodeKey}
+              placeholder="Scan or type barcodes — press Enter after each. First one is the default."
+              aria-label="Barcodes, separated by semicolons; the first is the default"
+              style={{ resize: "vertical", minHeight: 62, lineHeight: 1.5, fontFamily: "inherit" }}
+            />
+            <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 4 }}>
+              Separate multiple barcodes with “<b>;</b>” — scanning auto-adds it. Add as many as you like; the first is the item's default.
             </div>
           </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>

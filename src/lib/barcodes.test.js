@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, looksLikeBarcode,
+  barcodeMatchKey,
 } from "./barcodes.js";
 
 describe("itemBarcodes", () => {
@@ -59,6 +60,58 @@ describe("findItemByBarcode", () => {
     expect(findItemByBarcode(items, "0000000")).toBeNull();
     expect(findItemByBarcode(items, "")).toBeNull();
     expect(findItemByBarcode(items, "   ")).toBeNull();
+  });
+});
+
+describe("barcodeMatchKey (ignore last 5 digits when length > 10)", () => {
+  it("strips the last 5 characters when longer than 10", () => {
+    expect(barcodeMatchKey("2001234500999")).toBe("20012345"); // 13 → 8
+    expect(barcodeMatchKey("12345678901")).toBe("123456");     // 11 → 6
+  });
+  it("leaves codes of length 10 or less unchanged", () => {
+    expect(barcodeMatchKey("1234567890")).toBe("1234567890"); // exactly 10
+    expect(barcodeMatchKey("890123")).toBe("890123");
+  });
+  it("trims and lowercases", () => {
+    expect(barcodeMatchKey("  PSM12345ABCDE ")).toBe("psm12345"); // 13 → 8, lowercased
+  });
+});
+
+describe("findItemByBarcode — long variable-weight/price codes", () => {
+  const items = [
+    { id: "veg", name: "Loose Tomatoes", code: "2001234" },          // 7-digit product prefix
+    { id: "cheese", name: "Cheese Block", code: "2009999500100" },   // 13-digit sample weight barcode
+    { id: "milk", name: "Milk 1L", code: "8901234567890" },          // normal fixed EAN-13
+  ];
+
+  it("matches a long scan to a product stored by its prefix (last 5 ignored)", () => {
+    // scanned 12-digit weight barcode → prefix "2001234" matches the stored 7-digit prefix
+    expect(findItemByBarcode(items, "200123400575")?.id).toBe("veg");
+  });
+
+  it("matches two long codes that share the prefix but differ in the last 5 (price/weight)", () => {
+    expect(findItemByBarcode(items, "2009999512345")?.id).toBe("cheese");
+  });
+
+  it("still resolves a normal fixed barcode by EXACT match", () => {
+    expect(findItemByBarcode(items, "8901234567890")?.id).toBe("milk");
+  });
+
+  it("does not prefix-match a short (<=10) scan", () => {
+    expect(findItemByBarcode(items, "2001234500")).toBeNull(); // 10 chars → no stripping, no exact
+  });
+
+  it("returns null when no prefix matches", () => {
+    expect(findItemByBarcode(items, "7777777777777")).toBeNull();
+  });
+
+  it("prefers an EXACT match over a prefix collision", () => {
+    const two = [
+      { id: "a", name: "A", code: "8901234567890" },
+      { id: "b", name: "B", code: "8901234511111" }, // same first 8 "89012345"
+    ];
+    expect(findItemByBarcode(two, "8901234511111")?.id).toBe("b"); // exact wins, not the first prefix hit
+    expect(findItemByBarcode(two, "8901234567890")?.id).toBe("a");
   });
 });
 
