@@ -1055,9 +1055,9 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
       </Header>
       <div style={S.cards}>
         <Card label={isToday ? "Today's sales" : "Sales (this day)"} value={INR(rev)} sub={daySales.length + " bills" + (dayUdhari > 0 ? ` · ${INR(dayUdhari)} on udhari` : "")} />
-        <Card label={isToday ? "Today's profit" : "Profit (this day)"} value={INR(profit)} sub="after item cost" accent />
+        <Card label={isToday ? "Today's profit" : "Profit (this day)"} value={<>{INR(profit)} <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.85 }}>({rev > 0 ? Math.round((profit / rev) * 100) : 0}%)</span></>} sub="after item cost · % of sales" accent />
         <Card label={monthName + " revenue"} value={INR(monthRev)} sub={"month to date" + (monthUdhari > 0 ? ` · ${INR(monthUdhari)} on udhari` : "")} />
-        <Card label={monthName + " profit"} value={INR(monthProfit)} sub="month to date · after item cost" accent />
+        <Card label={monthName + " profit"} value={<>{INR(monthProfit)} <span style={{ fontSize: 14, fontWeight: 700, opacity: 0.85 }}>({monthRev > 0 ? Math.round((monthProfit / monthRev) * 100) : 0}%)</span></>} sub="month to date · after item cost · % of sales" accent />
         <Card label="Stock value" value={INR(stockValue)} sub={items.length + " items (at cost)"} />
       </div>
 
