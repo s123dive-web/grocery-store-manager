@@ -24,7 +24,10 @@ export function exportXlsx({ items, sales, expenses, logs, vendorBills, dailyBil
     wb,
     XLSX.utils.json_to_sheet(
       items.map((i) => ({
-        id: i.id, name: i.name, code: i.code || "", category: i.category, unit: i.unit,
+        id: i.id, name: i.name, code: i.code || "",
+        // Additional barcodes (beyond the primary `code`) as a comma-separated list.
+        barcodes: (Array.isArray(i.barcodes) ? i.barcodes : []).filter(Boolean).join(", "),
+        category: i.category, unit: i.unit,
         buyPrice: i.buyPrice, sellPrice: i.sellPrice, stock: i.stock, lowAt: i.lowAt,
         createdAt: i.createdAt || "", updatedAt: i.updatedAt || "",
       }))
@@ -80,7 +83,10 @@ export async function importXlsx(file) {
   const items = sheet("Items")
     .filter((r) => String(r.name || "").trim())
     .map((r) => ({
-      id: r.id || rid(), name: String(r.name).trim(), code: String(r.code || ""), category: r.category || "Other",
+      id: r.id || rid(), name: String(r.name).trim(), code: String(r.code || ""),
+      // Split the additional-barcodes cell back into an array (barcodes carry no spaces/commas).
+      barcodes: String(r.barcodes || "").split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean),
+      category: r.category || "Other",
       unit: r.unit || "pc", buyPrice: num(r.buyPrice), sellPrice: num(r.sellPrice), stock: num(r.stock),
       lowAt: num(r.lowAt), createdAt: r.createdAt || "", updatedAt: r.updatedAt || "",
     }));

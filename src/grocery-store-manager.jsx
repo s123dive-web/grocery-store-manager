@@ -12,6 +12,7 @@ import {
   writeSlice, overwriteSlice, subscribeSlice, subscribeConnection,
 } from "./lib/sync.js";
 import { parseFile, parseRawText } from "./lib/parse.js";
+import { itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, looksLikeBarcode } from "./lib/barcodes.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from "./lib/bills.js";
 import {
@@ -1265,6 +1266,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
   const [stockQty, setStockQty] = useState("");
   const [custFocus, setCustFocus] = useState(false); // customer-name field focused → show suggestions
+  const [notFound, setNotFound] = useState(null); // a scanned barcode that matched no product → modal
   const searchRef = useRef(null);
   useEffect(() => searchRef.current?.focus(), []);
 
@@ -1322,7 +1324,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
       // and on their own budget so a long list of in-stock matches can't crowd them out.
       const matches = items.filter((i) =>
         i.name.toLowerCase().includes(s) ||
-        (i.code || "").toLowerCase().includes(s) ||
+        itemBarcodes(i).some((b) => b.toLowerCase().includes(s)) ||
         (isNum && (+i.sellPrice === num || +i.mrp === num)));
       const inStockMatches = matches.filter((i) => (i.stock || 0) > 0);
       const outMatches = matches.filter((i) => (i.stock || 0) <= 0);
@@ -1387,13 +1389,21 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     notify(`Added “${name}” · ${INR(money(price))}`);
   };
 
-  // Enter (or a barcode scanner, which types then sends Enter) adds the best match.
+  // Enter fires from a barcode scanner (types the value then sends Enter) or a manual search.
+  // 1) Exact barcode match across ALL items → add/increment (this is the scan path).
+  // 2) Otherwise a manual search that matched something → add the top result (unchanged).
+  // 3) A barcode-shaped query that resolved to nothing → "Item not found" modal.
+  // A hit clears the input and keeps it focused so the next scan is ready. A miss clears the
+  // input and opens the modal (which takes focus); dismissing the modal returns focus to the input.
   const onSearchKey = (e) => {
-    if (e.key !== "Enter" || results.length === 0) return;
-    const code = q.trim().toLowerCase();
-    const exact = results.find((i) => (i.code || "").toLowerCase() === code && code);
-    add(exact || results[0]);
-    setQ("");
+    if (e.key !== "Enter") return;
+    const raw = q.trim();
+    if (!raw) return;
+    const hit = findItemByBarcode(items, raw);
+    if (hit) { add(hit); setQ(""); searchRef.current?.focus(); return; }        // known barcode → add / increment qty
+    if (results.length > 0) { add(results[0]); setQ(""); searchRef.current?.focus(); return; } // manual search → top match
+    if (looksLikeBarcode(raw)) { setQ(""); setNotFound(raw); return; }          // unknown scan → not-found modal
+    // A short/typed query with no match: leave it as-is (unchanged manual behavior).
   };
 
   const subtotal = money(cart.reduce((a, c) => a + c.sellPrice * c.qty, 0));
@@ -1637,12 +1647,23 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
           )}
         </section>
       </div>
+
+      {notFound != null && (
+        <Modal title="Item not found" onClose={() => { setNotFound(null); searchRef.current?.focus(); }}>
+          <div style={{ fontSize: 14, color: "#465", lineHeight: 1.6 }}>
+            No product has this barcode:
+            <div style={{ margin: "10px 0", fontFamily: "monospace", fontSize: 16, fontWeight: 800, textAlign: "center", background: "#F4F7F4", padding: "10px 12px", borderRadius: 8, wordBreak: "break-all" }}>{notFound}</div>
+            Add it from <b>Inventory</b> with this barcode, then it will scan here.
+          </div>
+          <button className="btn primary big" autoFocus style={{ width: "100%", marginTop: 14 }} onClick={() => { setNotFound(null); searchRef.current?.focus(); }}>OK</button>
+        </Modal>
+      )}
     </div>
   );
 }
 
 // ---------- Inventory ----------
-const blankItem = { name: "", code: "", category: CATEGORIES[0], unit: "pc", icon: "", buyPrice: "", sellPrice: "", mrp: "", stock: "", lowAt: 5, expiry: "" };
+const blankItem = { name: "", code: "", barcodes: [], category: CATEGORIES[0], unit: "pc", icon: "", buyPrice: "", sellPrice: "", mrp: "", stock: "", lowAt: 5, expiry: "" };
 
 // Normalised item name for duplicate detection (trim, lowercase, collapse inner spaces).
 const normName = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -1653,10 +1674,13 @@ function mergeItemGroup(group) {
   const sorted = [...group].sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
   const primary = sorted[0];
   const pick = (key) => sorted.map((x) => x[key]).find((v) => v != null && v !== "" && v !== 0);
+  // Union every merged item's barcodes so none are lost; the first becomes the primary `code`.
+  const allBc = cleanBarcodeList(sorted.flatMap((x) => itemBarcodes(x)));
   return {
     ...primary,
     name: (primary.name || "").trim(),
-    code: pick("code") || "",
+    code: allBc[0] || "",
+    barcodes: allBc.slice(1),
     category: primary.category || pick("category") || "Other",
     unit: primary.unit || pick("unit") || "pc",
     icon: primary.icon || iconFor(primary.category),
@@ -1686,7 +1710,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
     const term = q.trim().toLowerCase();
     return (
       (cat === "All" || i.category === cat) &&
-      (i.name.toLowerCase().includes(term) || (i.code || "").toLowerCase().includes(term))
+      (i.name.toLowerCase().includes(term) || itemBarcodes(i).some((b) => b.toLowerCase().includes(term)))
     );
   });
 
@@ -1731,8 +1755,13 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
         ? `Another item is already named “${clash.name}”.`
         : `“${clash.name}” already exists — use Restock or edit it instead.`);
     }
+    // Barcodes: primary field + any additional ones, de-duped, then checked for uniqueness across
+    // every other product so a scanned barcode can only ever resolve to one item.
+    const codes = cleanBarcodeList([f.code, ...(Array.isArray(f.barcodes) ? f.barcodes : [])]);
+    const bcClash = findBarcodeClash(codes, items, f.id);
+    if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const base = {
-      name: f.name.trim(), code: (f.code || "").trim(), category: f.category, unit: f.unit,
+      name: f.name.trim(), code: codes[0] || "", barcodes: codes.slice(1), category: f.category, unit: f.unit,
       icon: (f.icon || "").trim() || iconFor(f.category), buyPrice: buy || 0, sellPrice: sell,
       mrp: +f.mrp || sell, lowAt,
     };
@@ -1795,6 +1824,9 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
     const nn = normName(f.name);
     const clash = items.find((i) => normName(i.name) === nn && i.id !== f.id);
     if (clash) return notify(`Another item is already named “${clash.name}”.`);
+    // Inline edit changes only the primary barcode; check it doesn't collide with another product.
+    const bcClash = findBarcodeClash([f.code], items, f.id);
+    if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const newStock = Math.max(0, +f.stock || 0);
     const prevForLog = (items.find((i) => i.id === f.id)?.stock) || 0;
     // Functional updater so a live cloud snapshot mid-edit can't drop other items; the stock
@@ -1870,6 +1902,19 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       if (seen.has(nn)) return notify(`Duplicate name: “${f.name.trim()}”.`);
       seen.set(nn, id);
     }
+    // Barcode uniqueness across the whole catalogue: each row's edited primary + its preserved
+    // extras (quick edit never touches the additional barcodes), plus items left out of the edit.
+    const bcOwner = new Map(); // normalized barcode → item id
+    for (const it of items) {
+      const f = drafts[it.id];
+      const effective = { code: f ? (f.code || "").trim() : it.code, barcodes: it.barcodes };
+      for (const b of itemBarcodes(effective)) {
+        const k = b.toLowerCase();
+        const prev = bcOwner.get(k);
+        if (prev && prev !== it.id) return notify(`Barcode “${b}” is used by more than one item.`);
+        bcOwner.set(k, it.id);
+      }
+    }
     setItems((list) => list.map((i) => {
       const f = drafts[i.id];
       if (!f) return i; // items added after entering quick edit are left untouched
@@ -1894,16 +1939,35 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
 
   const stop = (e) => e.stopPropagation();
 
+  // ----- Add/Edit modal: multi-barcode list (primary `code` + additional `barcodes[]`) -----
+  // A fresh scan/append focuses the newly added row so a wedge scanner can fire several in a row.
+  const focusNewBarcode = useRef(false);
+  const addBarcodeRow = () => { focusNewBarcode.current = true; setForm((f) => ({ ...f, barcodes: [...(f.barcodes || []), ""] })); };
+  const setBarcodeAt = (idx, v) => setForm((f) => ({ ...f, barcodes: (f.barcodes || []).map((x, i) => (i === idx ? v : x)) }));
+  const removeBarcodeAt = (idx) => setForm((f) => ({ ...f, barcodes: (f.barcodes || []).filter((_, i) => i !== idx) }));
+  // A scanner ends its burst with Enter; here that must NOT save the form — it commits the value
+  // and opens a fresh row for the next scan instead.
+  const onBarcodeKey = (e) => { if (e.key === "Enter") { e.preventDefault(); addBarcodeRow(); } };
+
   // Editable cells (icon/name/code, category, added date, buy, sell, margin, stock+unit) shared
   // by per-row Edit and Quick edit. `d` is the draft, `sf(key,val)` updates it, `actionCell` is
   // the trailing cell (Save/Cancel for one row, empty in quick mode).
-  const renderEditRow = (i, d, sf, actionCell) => (
+  const renderEditRow = (i, d, sf, actionCell) => {
+    // Inline / quick edit changes only the primary barcode; count any additional ones (kept
+    // intact) to show a "+N" hint pointing the owner to ⚙ for the full multi-barcode editor.
+    const extraCount = (Array.isArray(i.barcodes) ? i.barcodes : []).filter((b) => String(b).trim()).length;
+    return (
     <tr>
       <td onClick={stop}>
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
           <input className="input" style={{ padding: "6px 4px", width: 38, textAlign: "center" }} value={d.icon} placeholder={iconFor(d.category)} onChange={(e) => sf("icon", e.target.value)} aria-label="Icon" />
           <input className="input" style={{ padding: "6px 8px", minWidth: 96, flex: 1 }} value={d.name} onChange={(e) => sf("name", e.target.value)} aria-label="Name" />
-          <input className="input" style={{ padding: "6px 8px", width: 84 }} value={d.code} placeholder="code" onChange={(e) => sf("code", e.target.value)} aria-label="Barcode / code" />
+        </div>
+      </td>
+      <td onClick={stop}>
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <input className="input" style={{ padding: "6px 8px", width: 96 }} value={d.code} placeholder="barcode" onChange={(e) => sf("code", e.target.value)} aria-label="Primary barcode" />
+          {extraCount > 0 && <span style={{ fontSize: 11, color: "#8A9C90", fontWeight: 700, whiteSpace: "nowrap" }} title="Additional barcodes — edit via ⚙">+{extraCount}</span>}
         </div>
       </td>
       <td onClick={stop}>
@@ -1926,7 +1990,8 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       </td>
       {actionCell}
     </tr>
-  );
+    );
+  };
 
   return (
     <div>
@@ -1958,6 +2023,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
           <thead>
             <tr>
               {sortTh("name", "Item")}
+              <th style={{ textAlign: "left", whiteSpace: "nowrap" }}>Barcode</th>
               {sortTh("category", "Category")}
               {sortTh("createdAt", "Added")}
               {sortTh("buyPrice", "Buy", "right")}
@@ -1986,8 +2052,14 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                   <tr style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : i.id)}>
                     <td style={{ fontWeight: 600 }}>
                       <span style={{ marginRight: 6 }}>{i.icon || "📦"}</span>{i.name}
-                      {i.code ? <span style={{ color: "#9AA", fontWeight: 400, fontSize: 11 }}> · {i.code}</span> : null}
                       <span style={{ color: "#AAB", marginLeft: 6 }}>{isOpen ? "▾" : "▸"}</span>
+                    </td>
+                    <td style={{ color: "#677", fontSize: 12.5, whiteSpace: "nowrap" }}>
+                      {(() => {
+                        const bcs = itemBarcodes(i);
+                        if (!bcs.length) return <span style={{ color: "#B7C2BA" }}>—</span>;
+                        return <span title={bcs.join(", ")}>{bcs[0]}{bcs.length > 1 ? <span style={{ color: "#1B5E43", fontWeight: 700 }}> +{bcs.length - 1}</span> : null}</span>;
+                      })()}
                     </td>
                     <td style={{ color: "#677" }}>{i.category}</td>
                     <td style={{ color: "#789", whiteSpace: "nowrap", fontSize: 12.5 }}>{i.createdAt || "—"}{i.updatedAt && i.updatedAt !== i.createdAt ? <span title={"edited " + i.updatedAt}> ✎</span> : null}</td>
@@ -2001,14 +2073,14 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn small" onClick={(e) => { stop(e); setRestock({ id: i.id, name: i.name, qty: "", expiry: "" }); }}>Restock</button>{" "}
                       <button className="btn small ghost" onClick={(e) => { stop(e); startRowEdit(i); }}>Edit</button>{" "}
-                      <button className="btn small ghost" title="More fields (MRP, low-stock alert, dated stock)" aria-label={"More fields for " + i.name} onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", expiry: "" }); }}>⚙</button>{" "}
+                      <button className="btn small ghost" title="More fields (MRP, barcodes, low-stock alert, dated stock)" aria-label={"More fields for " + i.name} onClick={(e) => { stop(e); setForm({ ...i, mrp: i.mrp ?? "", icon: i.icon || "", barcodes: Array.isArray(i.barcodes) ? [...i.barcodes] : [], expiry: "" }); }}>⚙</button>{" "}
                       <button className="btn small danger" aria-label={"Delete " + i.name} onClick={(e) => { stop(e); del(i); }}>✕</button>
                     </td>
                   </tr>
                   )}
                   {!quickEdit && isOpen && (
                     <tr>
-                      <td colSpan={8} style={{ background: "#F7FAF7" }}>
+                      <td colSpan={9} style={{ background: "#F7FAF7" }}>
                         {batchEdit?.id === i.id ? (
                           <div onClick={stop}>
                             <table className="tbl" style={{ margin: 0 }}>
@@ -2065,7 +2137,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                 </Fragment>
               );
             })}
-            {filtered.length === 0 && <tr><td colSpan={8}><Empty text="No items found." /></td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={9}><Empty text="No items found." /></td></tr>}
           </tbody>
         </table>
       </section>
@@ -2083,7 +2155,25 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
               return { ...f, name, category: g, icon: isAutoIcon(f.icon, f.category) ? iconFor(g) : f.icon };
             });
           }} placeholder="e.g. Amul Butter 100g" /></Field>
-          <Field label="Barcode / code (optional)"><input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Scan or type a barcode" /></Field>
+          <Field label="Barcodes (optional)">
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input className="input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} onKeyDown={onBarcodeKey} placeholder="Scan or type the default barcode" aria-label="Default barcode" />
+                <span style={{ fontSize: 11, color: "#8A9C90", whiteSpace: "nowrap", minWidth: 44, textAlign: "right" }}>default</span>
+              </div>
+              {(form.barcodes || []).map((b, idx) => (
+                <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input
+                    className="input"
+                    ref={idx === (form.barcodes || []).length - 1 ? (el) => { if (el && focusNewBarcode.current) { el.focus(); focusNewBarcode.current = false; } } : undefined}
+                    value={b} onChange={(e) => setBarcodeAt(idx, e.target.value)} onKeyDown={onBarcodeKey}
+                    placeholder="Additional barcode" aria-label={"Additional barcode " + (idx + 1)} />
+                  <button type="button" className="btn small ghost" style={{ minWidth: 44 }} aria-label={"Remove barcode " + (idx + 1)} onClick={() => removeBarcodeAt(idx)}>✕</button>
+                </div>
+              ))}
+              <button type="button" className="btn small ghost" style={{ alignSelf: "flex-start" }} onClick={addBarcodeRow}>＋ Add another barcode</button>
+            </div>
+          </Field>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Field label="Category">
               <div style={{ display: "flex", gap: 6 }}>
@@ -2213,9 +2303,23 @@ function BarcodeCreator({ items, setItems, notify, log }) {
 
   const saveToItem = () => {
     if (!itemId) return notify("Pick an inventory item first to save its barcode");
-    if (!code.trim()) return notify("Nothing to save");
-    setItems((list) => list.map((i) => (i.id === itemId ? { ...i, code: code.trim(), updatedAt: todayStr() } : i)));
-    log("inventory", `Set barcode for “${name}” → ${code.trim()}`);
+    const val = code.trim();
+    if (!val) return notify("Nothing to save");
+    const target = items.find((i) => i.id === itemId);
+    if (!target) return notify("That item no longer exists");
+    // Must be unique across every other product so a scan resolves to exactly one item.
+    const clash = findBarcodeClash([val], items, itemId);
+    if (clash) return notify(`Barcode “${val}” already belongs to “${clash.item.name}”.`);
+    if (itemBarcodes(target).some((b) => b.toLowerCase() === val.toLowerCase()))
+      return notify(`“${target.name}” already has that barcode.`);
+    // Empty product → this becomes the default; otherwise it's an additional barcode.
+    setItems((list) => list.map((i) => {
+      if (i.id !== itemId) return i;
+      return (i.code || "").trim()
+        ? { ...i, barcodes: [...(Array.isArray(i.barcodes) ? i.barcodes : []), val], updatedAt: todayStr() }
+        : { ...i, code: val, updatedAt: todayStr() };
+    }));
+    log("inventory", `Added barcode for “${name}” → ${val}`);
     notify("Barcode saved to item — it can now be scanned at billing");
   };
 
