@@ -1268,7 +1268,9 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [custFocus, setCustFocus] = useState(false); // customer-name field focused → show suggestions
   const [notFound, setNotFound] = useState(null); // a scanned barcode that matched no product → modal
   const searchRef = useRef(null);
+  const notFoundAt = useRef(0); // when the not-found modal opened — used to swallow a scanner's trailing Enter
   useEffect(() => searchRef.current?.focus(), []);
+  const showNotFound = (code) => { notFoundAt.current = Date.now(); setNotFound(code); };
 
   // Unique past customers (name + most-recent non-empty mobile) for the name autocomplete.
   // Sales are appended oldest→newest, so the last seen mobile per name is the most recent.
@@ -1400,13 +1402,14 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   // takes focus) and returns focus to the input when dismissed.
   const onSearchKey = (e) => {
     if (e.key !== "Enter") return;
+    if (notFound != null) { setQ(""); return; }                                 // modal already open → swallow trailing Enter(s)
     const raw = String(e.target.value ?? q).trim();
     if (!raw) return;
     const hit = findItemByBarcode(items, raw);
     if (hit) { add(hit); setQ(""); searchRef.current?.focus(); return; }        // known barcode → add / increment qty
-    if (looksLikeBarcode(raw)) { setQ(""); setNotFound(raw); return; }          // unmatched scan → not-found modal
+    if (looksLikeBarcode(raw)) { setQ(""); showNotFound(raw); return; }         // unmatched scan → not-found modal
     if (results.length > 0) { add(results[0]); setQ(""); searchRef.current?.focus(); return; } // manual search → top match
-    setQ(""); setNotFound(raw);                                                 // typed query, nothing matched → modal
+    setQ(""); showNotFound(raw);                                                // typed query, nothing matched → modal
   };
 
   const subtotal = money(cart.reduce((a, c) => a + c.sellPrice * c.qty, 0));
@@ -1658,7 +1661,15 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
             <div style={{ margin: "10px 0", fontFamily: "monospace", fontSize: 16, fontWeight: 800, textAlign: "center", background: "#F4F7F4", padding: "10px 12px", borderRadius: 8, wordBreak: "break-all" }}>{notFound}</div>
             Add it from <b>Inventory</b> (with this barcode) so it scans here next time.
           </div>
-          <button className="btn primary big" autoFocus style={{ width: "100%", marginTop: 14 }} onClick={() => { setNotFound(null); searchRef.current?.focus(); }}>OK</button>
+          <button
+            className="btn primary big" autoFocus style={{ width: "100%", marginTop: 14 }}
+            onClick={(e) => {
+              // A scanner's trailing Enter (CR/LF suffix) lands on this auto-focused button and
+              // would dismiss the modal instantly. Ignore a keyboard-triggered click (e.detail === 0)
+              // in the first moment after it opens; a real mouse/touch tap (detail ≥ 1) always closes.
+              if (e.detail === 0 && Date.now() - notFoundAt.current < 600) return;
+              setNotFound(null); searchRef.current?.focus();
+            }}>OK</button>
         </Modal>
       )}
     </div>
