@@ -1344,17 +1344,35 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     return [...[...inStock].sort(byActivity).slice(0, 12), ...out.slice(0, 8)];
   }, [q, items, soldQty, lastSold]);
 
+  // Put an item on the bill (or bump its qty if already there). Functional update so rapid
+  // clicks / scanner input never read a stale cart.
+  const pushToCart = (item) => setCart((cart) => {
+    const ex = cart.find((c) => c.id === item.id);
+    return ex
+      ? cart.map((c) => (c.id === item.id ? { ...c, qty: c.qty + 1 } : c))
+      : [...cart, { id: item.id, name: item.name, icon: item.icon, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: 1 }];
+  });
+
   const add = (item) => {
     if (item.stock <= 0) return notify("Out of stock: " + item.name);
     const ex = cart.find((c) => c.id === item.id);
     if (ex && ex.qty + 1 > item.stock) return notify("Only " + item.stock + " " + item.unit + " in stock");
-    // Functional update so rapid clicks / scanner input never read a stale cart.
-    setCart((cart) => {
-      const ex = cart.find((c) => c.id === item.id);
-      return ex
-        ? cart.map((c) => (c.id === item.id ? { ...c, qty: c.qty + 1 } : c))
-        : [...cart, { id: item.id, name: item.name, icon: item.icon, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: 1 }];
-    });
+    pushToCart(item);
+  };
+
+  // Scanning a barcode always adds the item to the bill — even at zero stock. A sold-out item is
+  // auto-restocked to SCAN_RESTOCK_QTY (5) so the till isn't blocked; the restock is guarded by a
+  // functional updater so a rapid second scan of the same item can't stack another +5.
+  const SCAN_RESTOCK_QTY = 5;
+  const addScannedItem = (item) => {
+    if ((item.stock || 0) <= 0) {
+      setItems((list) => list.map((i) => (i.id === item.id && (i.stock || 0) <= 0 ? addBatch(i, SCAN_RESTOCK_QTY, "", todayStr()) : i)));
+      log("inventory", `Auto-restocked “${item.name}” to ${SCAN_RESTOCK_QTY} (scanned at billing while out of stock)`);
+      notify(`“${item.name}” was out of stock — restocked to ${SCAN_RESTOCK_QTY} and added.`);
+      pushToCart(item);
+      return;
+    }
+    add(item);
   };
   const setQty = (id, qty) => {
     const line = cart.find((c) => c.id === id);
@@ -1406,7 +1424,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     const raw = String(e.target.value ?? q).trim();
     if (!raw) return;
     const hit = findItemByBarcode(items, raw);
-    if (hit) { add(hit); setQ(""); searchRef.current?.focus(); return; }        // known barcode → add / increment qty
+    if (hit) { addScannedItem(hit); setQ(""); searchRef.current?.focus(); return; } // known barcode → add (auto-restock if sold out)
     if (looksLikeBarcode(raw)) { setQ(""); showNotFound(raw); return; }         // unmatched scan → not-found modal
     if (results.length > 0) { add(results[0]); setQ(""); searchRef.current?.focus(); return; } // manual search → top match
     setQ(""); showNotFound(raw);                                                // typed query, nothing matched → modal
