@@ -988,13 +988,17 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
   const [date, setDate] = useState(todayStr());
   const isToday = date === todayStr();
   const daySales = sales.filter((s) => s.date === date);
-  const rev = money(daySales.reduce((a, s) => a + s.total, 0));
-  const profit = money(daySales.reduce((a, s) => a + s.profit, 0));
-  const stockValue = money(items.reduce((a, i) => a + i.buyPrice * i.stock, 0));
+  const rev = money(daySales.reduce((a, s) => a + (s.total || 0), 0));
+  const profit = money(daySales.reduce((a, s) => a + (s.profit || 0), 0));
+  // Value of on-hand stock at cost. Reuse the shared helper (which coerces every
+  // item's buyPrice/stock with Number(..)||0) so one item with a missing/blank
+  // price can't turn the whole sum into NaN, and this card always matches the
+  // Inventory "Stock value by category" total (inv.cost).
+  const stockValue = inventoryValue(items).cost;
   const month = date.slice(0, 7);
   const monthSales = sales.filter((s) => s.date.startsWith(month));
-  const monthRev = money(monthSales.reduce((a, s) => a + s.total, 0));
-  const monthProfit = money(monthSales.reduce((a, s) => a + s.profit, 0));
+  const monthRev = money(monthSales.reduce((a, s) => a + (s.total || 0), 0));
+  const monthProfit = money(monthSales.reduce((a, s) => a + (s.profit || 0), 0));
   // Sales/revenue above are amounts BOOKED (they include Udhari/credit bills at full value).
   // These are the still-unpaid (on-credit) portions, shown as a sub-note so the gap is visible.
   const udhariOf = (list) => money(list.reduce((a, s) => a + (s.payment === "Udhari" ? Math.max(0, (s.total || 0) - (s.paid || 0)) : 0), 0));
