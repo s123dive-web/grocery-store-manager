@@ -22,25 +22,27 @@ export function itemBarcodes(item) {
   return out;
 }
 
-// Variable-weight / price-embedded barcodes (produce, deli, etc.) carry a changing price or
-// weight in their trailing digits, so the identifying part of a long code is everything except
-// the last 3 digits. For codes longer than 10 this returns that prefix; shorter codes are
-// returned unchanged. Used by billing to match the same product regardless of the embedded value.
+// In-store variable-weight / price-embedded barcodes carry a changing price or weight in their
+// trailing digits. Per the EAN standard these are the "restricted distribution" numbers that
+// start with "2", so ONLY those get their last 3 digits ignored (returning the identifying
+// prefix). Every standard product barcode (890…, etc.) is returned unchanged and must match
+// exactly — stripping its digits would wrongly collide different products from the same maker.
 export function barcodeMatchKey(code) {
   const t = String(code ?? "").trim().toLowerCase();
-  return t.length > 10 ? t.slice(0, -3) : t;
+  return (t.length > 10 && t.startsWith("2")) ? t.slice(0, -3) : t;
 }
 
 // The item matching a scanned barcode, or null. An EXACT (case-insensitive) match always wins —
-// a normal fixed barcode resolves to its own product. Only when nothing matches exactly do long
-// codes fall back to a prefix match (last 3 digits ignored) so weight/price barcodes still scan.
+// a normal fixed barcode resolves to its own product. Only a variable-weight "2"-prefix code that
+// has no exact match falls back to a prefix match (last 3 digits ignored) so scales still scan;
+// standard barcodes never fall back, so they can't collide with a same-prefix product.
 export function findItemByBarcode(items, scanned) {
   const raw = String(scanned ?? "").trim().toLowerCase();
   if (!raw) return null;
   const exact = (items || []).find((i) => itemBarcodes(i).some((b) => b.toLowerCase() === raw));
   if (exact) return exact;
   const key = barcodeMatchKey(raw);
-  if (key === raw) return null; // nothing was stripped (code ≤ 10) → no prefix fallback to try
+  if (key === raw) return null; // not a variable-weight code → exact only, no prefix fallback
   return (items || []).find((i) => itemBarcodes(i).some((b) => barcodeMatchKey(b) === key)) || null;
 }
 
