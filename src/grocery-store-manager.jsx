@@ -515,11 +515,29 @@ const STORE = {
 // cached sum. Adding stock appends a batch; selling depletes batches FIFO by expiry.
 const batchSort = (a, b) => (String(a.expiry || "9999-99-99") < String(b.expiry || "9999-99-99") ? -1 : 1);
 
+// Coerce an item's money/quantity fields to real numbers. Firebase, legacy data and
+// spreadsheet imports can store stock/prices as STRINGS; left untouched they silently
+// corrupt every downstream calculation (stock value, profit, sorting) and can concatenate
+// in addBatch. Applied at each point raw item data enters React state so the rest of the
+// app can trust these fields are numbers. A blank/garbage value collapses to 0.
+const numify = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+function normalizeItem(i) {
+  if (!i || typeof i !== "object") return i;
+  const out = { ...i, buyPrice: numify(i.buyPrice), sellPrice: numify(i.sellPrice), stock: numify(i.stock) };
+  if (i.mrp !== undefined) out.mrp = numify(i.mrp);
+  if (Array.isArray(i.batches)) out.batches = i.batches.map((b) => ({ ...b, qty: numify(b.qty) }));
+  return out;
+}
+const normalizeItems = (arr) => (Array.isArray(arr) ? arr.map(normalizeItem) : arr);
+
 function addBatch(item, qty, expiry, date) {
   const q = +qty || 0;
   if (q <= 0) return item;
   const batches = [...(item.batches || []), { id: uid(), qty: q, expiry: expiry || "", addedOn: date || todayStr() }];
-  return { ...item, batches, stock: (item.stock || 0) + q, updatedAt: date || todayStr() };
+  // (+item.stock || 0), NOT (item.stock || 0): if stock is a STRING (legacy/imported/cloud
+  // data), a bare `+` concatenates ("5" + 5 → "55") and snowballs a stock into a nonsense
+  // multi-billion figure over repeated restocks/scans. Coerce to a real number first.
+  return { ...item, batches, stock: (+item.stock || 0) + q, updatedAt: date || todayStr() };
 }
 
 function removeStock(item, qty, date) {
@@ -695,7 +713,7 @@ function StoreManager({ user, onLogout }) {
   useEffect(() => {
     try {
       const c = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
-      if (c) { setItems(c.items || []); setSales(c.sales || []); setExpenses(c.expenses || []); setLogs(c.logs || []); setBills(c.vendorBills || []); setDailyBills(c.dailyBills || []); }
+      if (c) { setItems(normalizeItems(c.items || [])); setSales(c.sales || []); setExpenses(c.expenses || []); setLogs(c.logs || []); setBills(c.vendorBills || []); setDailyBills(c.dailyBills || []); }
     } catch (e) { console.error("cache read failed", e); }
     setLoaded(true);
   }, []);
@@ -714,7 +732,7 @@ function StoreManager({ user, onLogout }) {
             const map = toMap(SEED_ITEMS);
             lastRemote.current.items = map;
             synced.current.items = true;
-            setItems(mapToArray("items", map));
+            setItems(normalizeItems(mapToArray("items", map)));
             overwriteSlice("items", map).catch((e) => console.error("seed write failed", e));
             return;
           }
@@ -730,7 +748,10 @@ function StoreManager({ user, onLogout }) {
           // Merge against the TRUE current state via the functional updater — NOT a ref that
           // may lag a just-dispatched local edit by a render. This is what stops an incoming
           // snapshot from silently reverting an edit/restock/delete made a moment earlier.
-          setter((curr) => mapToArray(slice, wasSynced ? mergeRemote(base, theirs, toMap(curr)) : theirs));
+          setter((curr) => {
+            const next = mapToArray(slice, wasSynced ? mergeRemote(base, theirs, toMap(curr)) : theirs);
+            return slice === "items" ? normalizeItems(next) : next;
+          });
         },
         (err) => {
           console.error("sync read failed", slice, err);
@@ -853,7 +874,7 @@ function StoreManager({ user, onLogout }) {
       const d = ext === "xlsx" || ext === "xls" ? await importXlsx(f) : JSON.parse(await f.text());
       if (!d || !Array.isArray(d.items)) throw new Error("bad file");
       if (!confirm("Restore this backup? It will REPLACE all current data on this device.")) return;
-      setItems(d.items);
+      setItems(normalizeItems(d.items));
       setSales(Array.isArray(d.sales) ? d.sales : []);
       setExpenses(Array.isArray(d.expenses) ? d.expenses : []);
       setLogs(Array.isArray(d.logs) ? d.logs : []);
