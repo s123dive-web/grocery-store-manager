@@ -24,16 +24,16 @@ export function itemBarcodes(item) {
 
 // Variable-weight / price-embedded barcodes (produce, deli, etc.) carry a changing price or
 // weight in their trailing digits, so the identifying part of a long code is everything except
-// the last 5 digits. For codes longer than 10 this returns that prefix; shorter codes are
+// the last 3 digits. For codes longer than 10 this returns that prefix; shorter codes are
 // returned unchanged. Used by billing to match the same product regardless of the embedded value.
 export function barcodeMatchKey(code) {
   const t = String(code ?? "").trim().toLowerCase();
-  return t.length > 10 ? t.slice(0, -5) : t;
+  return t.length > 10 ? t.slice(0, -3) : t;
 }
 
 // The item matching a scanned barcode, or null. An EXACT (case-insensitive) match always wins —
 // a normal fixed barcode resolves to its own product. Only when nothing matches exactly do long
-// codes fall back to a prefix match (last 5 digits ignored) so weight/price barcodes still scan.
+// codes fall back to a prefix match (last 3 digits ignored) so weight/price barcodes still scan.
 export function findItemByBarcode(items, scanned) {
   const raw = String(scanned ?? "").trim().toLowerCase();
   if (!raw) return null;
