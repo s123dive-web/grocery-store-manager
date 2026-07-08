@@ -116,8 +116,11 @@ function printReceipt(sale) {
     @page { size: 72mm auto; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 72mm; background: #fff; }
+    /* font-weight 600 (renders bold on Courier New) fires more dots per glyph => darker on a
+       203dpi thermal head. This is the main lever left for faintness; true density still comes
+       from the driver's darkness/speed setting. */
     body { width: 72mm; padding: 3mm 2mm 8mm; color: #000;
-      font-family: 'Courier New', Courier, monospace; font-size: 12px; line-height: 1.35;
+      font-family: 'Courier New', Courier, monospace; font-size: 12px; font-weight: 600; line-height: 1.35;
       -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .logo { display:block; margin:0 auto 1mm; height:12mm; object-fit:contain; }
     /* Header/address use a Devanagari-capable stack so a Marathi/Hindi shop name renders. */
@@ -135,7 +138,7 @@ function printReceipt(sale) {
     .col-name .sub { display:block; padding-left:2.5mm; font-size:11px; }
     .col-qty { width:8mm; text-align:right; white-space:nowrap; padding-right:1.5mm; }
     .col-amt { width:18mm; text-align:right; white-space:nowrap; } /* ₹ stays attached to the number */
-    tr.tot td { border-top:1px dashed #000; font-weight:700; font-size:13px; padding-top:2px; }
+    tr.tot td { border-top:1px dashed #000; font-weight:700; font-size:14px; padding-top:2px; }
     .ft { text-align:center; font-size:12px; margin-top:2mm; }
     .qr { text-align:center; margin-top:3mm; }
     .qr img { width:40mm; height:40mm; object-fit:contain; }
