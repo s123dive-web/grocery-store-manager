@@ -92,40 +92,73 @@ function printHtml(html, title) {
 }
 
 // Build a thermal-style receipt and send it to the printer.
+// PRESENTATION ONLY — this function computes no bill data. Every value below (l.name, l.qty,
+// l.price, l.amount, sale.total, discount, payment …) is read straight off the sale and merely
+// laid out for a 72mm (80mm paper) ESC/POS thermal printer. See printHtml() for the print
+// mechanism (isolated iframe document → no app-UI leakage).
 function printReceipt(sale) {
   const rows = sale.lines
-    .map(
-      (l) =>
-        `<tr><td>${escapeHtml(l.name)}</td><td class="c">${l.qty}</td><td class="r">${INR(l.amount)}</td></tr>`
-    )
+    .map((l) => {
+      // Unit-price subline under the name: preserves the "unit price" field without a 4th column.
+      // Skipped for misc/custom-amount lines where a per-unit price isn't meaningful.
+      const unit = l.unit ? `/${escapeHtml(String(l.unit))}` : "";
+      const sub =
+        !l.misc && l.price != null && l.price !== ""
+          ? `<span class="sub">@ ${INR(l.price)}${unit}</span>`
+          : "";
+      return `<tr><td class="col-name"><span class="nm">${escapeHtml(l.name)}</span>${sub}</td><td class="col-qty">${escapeHtml(String(l.qty))}</td><td class="col-amt">${INR(l.amount)}</td></tr>`;
+    })
     .join("");
   printHtml(
-    `<style>body{font-family:'Courier New',monospace;padding:10px;width:280px;color:#000}
-    h2{text-align:center;margin:4px 0}.meta{text-align:center;font-size:11px}
-    .logo{display:block;margin:0 auto 2px;height:46px;object-fit:contain}
-    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
-    td{padding:2px 0}.c{text-align:center}.r{text-align:right}
-    .tot td{border-top:1px dashed #000;font-weight:bold;padding-top:4px}
-    .ft{text-align:center;font-size:11px;margin-top:8px;border-top:1px dashed #000;padding-top:6px}
-    .pay{text-align:center;margin-top:10px;border-top:1px dashed #000;padding-top:8px}
-    .pay img{width:150px;height:150px;object-fit:contain}
-    .pay .lbl{font-size:11px;font-weight:bold;margin-top:2px}</style>
+    `<style>
+    /* Dedicated 72mm thermal receipt. size:_auto_ height => no blank paper feed; margin:0 =>
+       no scaling. Everything is pure #000; print-color-adjust:exact keeps black solid + QR crisp. */
+    @page { size: 72mm auto; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 72mm; background: #fff; }
+    body { width: 72mm; padding: 3mm 2mm 8mm; color: #000;
+      font-family: 'Courier New', Courier, monospace; font-size: 12px; line-height: 1.35;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .logo { display:block; margin:0 auto 1mm; height:12mm; object-fit:contain; }
+    /* Header/address use a Devanagari-capable stack so a Marathi/Hindi shop name renders. */
+    .shop { text-align:center; font-weight:700; font-size:15px; line-height:1.2;
+      font-family:'Nirmala UI','Segoe UI','Courier New',monospace; }
+    .addr { text-align:center; font-size:11px; line-height:1.3; margin-top:1px;
+      font-family:'Nirmala UI','Segoe UI','Courier New',monospace; }
+    .meta { text-align:center; font-size:11px; line-height:1.3; margin-top:1px; }
+    .rule { border-top:1px dashed #000; margin:2mm 0; }
+    /* Fixed columns => name/qty/amount stay aligned no matter how names wrap. */
+    table.items { width:100%; border-collapse:collapse; table-layout:fixed; }
+    table.items td { vertical-align:top; padding:1px 0; font-size:12px; }
+    .col-name { padding-right:1.5mm; overflow-wrap:break-word; }
+    .col-name .nm { display:block; padding-left:2.5mm; text-indent:-2.5mm; overflow-wrap:anywhere; } /* hanging indent on wrap, never truncated */
+    .col-name .sub { display:block; padding-left:2.5mm; font-size:11px; }
+    .col-qty { width:8mm; text-align:right; white-space:nowrap; padding-right:1.5mm; }
+    .col-amt { width:18mm; text-align:right; white-space:nowrap; } /* ₹ stays attached to the number */
+    tr.tot td { border-top:1px dashed #000; font-weight:700; font-size:13px; padding-top:2px; }
+    .ft { text-align:center; font-size:12px; margin-top:2mm; }
+    .qr { text-align:center; margin-top:3mm; }
+    .qr img { width:40mm; height:40mm; object-fit:contain; }
+    .qr .cap { font-size:11px; font-weight:700; margin-top:1mm; }
+    </style>
     <img class="logo" src="${assetUrl(LOGO_SRC)}" alt="" onerror="this.style.display='none'" />
-    <h2>${escapeHtml(STORE.name)}</h2>
-    <div class="meta">${escapeHtml(STORE.address)}</div>
+    <div class="shop">${escapeHtml(STORE.name)}</div>
+    <div class="addr">${escapeHtml(STORE.address)}</div>
     <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
-    <table>${rows}
-    ${sale.discount > 0 ? `<tr><td>Subtotal</td><td></td><td class="r">${INR(sale.subtotal != null ? sale.subtotal : money((sale.total || 0) + sale.discount))}</td></tr>
-    <tr><td>Discount${sale.discountPct ? " (" + sale.discountPct + "%)" : ""}</td><td></td><td class="r">−${INR(sale.discount)}</td></tr>` : ""}
-    <tr class="tot"><td>TOTAL</td><td></td><td class="r">${INR(sale.total)}</td></tr>
+    <div class="rule"></div>
+    <table class="items">${rows}
+    ${sale.discount > 0 ? `<tr><td class="col-name">Subtotal</td><td class="col-qty"></td><td class="col-amt">${INR(sale.subtotal != null ? sale.subtotal : money((sale.total || 0) + sale.discount))}</td></tr>
+    <tr><td class="col-name">Discount${sale.discountPct ? " (" + sale.discountPct + "%)" : ""}</td><td class="col-qty"></td><td class="col-amt">−${INR(sale.discount)}</td></tr>` : ""}
+    <tr class="tot"><td class="col-name">TOTAL</td><td class="col-qty"></td><td class="col-amt">${INR(sale.total)}</td></tr>
     </table>
     ${sale.payment ? `<div class="meta">Paid via ${escapeHtml(sale.payment)}${sale.customer ? " — " + escapeHtml(sale.customer) : ""}</div>` : ""}
     ${sale.customer || sale.mobile ? `<div class="meta">Customer: ${escapeHtml(sale.customer || "—")}${sale.mobile ? " · " + escapeHtml(sale.mobile) : ""}</div>` : ""}
     ${sale.payment === "Udhari" ? `<div class="meta">Paid now: ${INR(sale.paid || 0)}${sale.paidMode ? " (" + escapeHtml(sale.paidMode) + ")" : ""} &nbsp; Balance due: ${INR(Math.max(0, (sale.total || 0) - (sale.paid || 0)))}</div>` : ""}
+    <div class="rule"></div>
     <div class="ft">Thank you! Please visit again.</div>
-    <div class="pay">
+    <div class="qr">
       <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
-      <div class="lbl">Scan to Pay · PhonePe / UPI</div>
+      <div class="cap">Scan to Pay · PhonePe / UPI</div>
     </div>`,
     "Receipt"
   );
@@ -852,7 +885,7 @@ function StoreManager({ user, onLogout }) {
   };
 
   const exportData = (fmt) => {
-    const data = { items, sales, expenses, logs, vendorBills: bills, dailyBills };
+    const data = { items, sales, expenses, logs, vendorBills: bills, dailyBills, customCats };
     const fname = `prakash-supermart-${todayStr()}.${fmt === "xlsx" ? "xlsx" : "json"}`;
     try {
       if (fmt === "xlsx") exportXlsx(data, fname);
@@ -880,6 +913,9 @@ function StoreManager({ user, onLogout }) {
       setLogs(Array.isArray(d.logs) ? d.logs : []);
       setBills(Array.isArray(d.vendorBills) ? d.vendorBills : []);
       setDailyBills(Array.isArray(d.dailyBills) ? d.dailyBills : []);
+      // Owner-added categories with no item yet — only overwrite when the backup carries them,
+      // so restoring an older backup (which predates this field) doesn't wipe current categories.
+      if (Array.isArray(d.customCats)) setCustomCats(d.customCats.filter((x) => typeof x === "string"));
       addLog("backup", `Backup restored (${ext.toUpperCase()})`);
       notify("Backup restored");
     } catch (err) {
