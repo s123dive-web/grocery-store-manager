@@ -119,7 +119,10 @@ function printReceipt(sale) {
     /* font-weight 600 (renders bold on Courier New) fires more dots per glyph => darker on a
        203dpi thermal head. This is the main lever left for faintness; true density still comes
        from the driver's darkness/speed setting. */
-    body { width: 72mm; padding: 3mm 2mm 8mm; color: #000;
+    /* 4mm side padding (not 2mm): the printable area is 72mm but the print head's right/left
+       non-printable margins vary, and right-aligned amounts were clipping at the paper edge.
+       4mm each side keeps the last digit safely inside the printable window on 80mm rolls. */
+    body { width: 72mm; padding: 3mm 4mm 8mm; color: #000;
       font-family: 'Courier New', Courier, monospace; font-size: 12px; font-weight: 600; line-height: 1.35;
       -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     .logo { display:block; margin:0 auto 1mm; height:12mm; object-fit:contain; }
