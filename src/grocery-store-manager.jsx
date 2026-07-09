@@ -1330,6 +1330,14 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   const [miscName, setMiscName] = useState("");
   const [miscPrice, setMiscPrice] = useState("");
   const [miscBuy, setMiscBuy] = useState(""); // optional cost/buy price for a misc line → feeds profit
+  // "New item" quick-add: create a real catalogued product (with its barcode) straight from billing,
+  // so a just-arrived item can be registered AND billed in one step instead of a trip to Inventory.
+  const [bcCode, setBcCode] = useState("");   // barcode (scanned/typed) for the new product
+  const [bcName, setBcName] = useState("");
+  const [bcBuy, setBcBuy] = useState("");     // optional buy/cost price
+  const [bcSell, setBcSell] = useState("");
+  const [bcStock, setBcStock] = useState("20"); // opening stock — defaults to 20, editable
+  const bcNameRef = useRef(null);             // focused when the "not found" modal hands a scan over
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
   const [stockQty, setStockQty] = useState("");
   const [custFocus, setCustFocus] = useState(false); // customer-name field focused → show suggestions
@@ -1476,6 +1484,40 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     notify(`Added “${name}” · ${INR(money(price))}`);
   };
 
+  // Register a brand-new product from billing: it goes into inventory (with its barcode + a guessed
+  // category + an opening stock of 20 by default) AND onto the current bill in one step. Unlike a
+  // misc line, this creates a real catalogued item — so it must pass the same name/barcode
+  // uniqueness checks as the Inventory add form, and its cart line is inventory-backed so completing
+  // the sale depletes its stock (20 → 19 …) like any normal item.
+  const addBarcodeItem = () => {
+    const codes = parseBarcodeText(bcCode); // clean + de-dupe; first token is the primary code
+    if (!codes.length) return notify("Scan or enter a barcode for the new item.");
+    const name = bcName.trim();
+    if (!name) return notify("Enter a name for the new item.");
+    const sell = +bcSell;
+    if (!(sell > 0)) return notify("Enter a selling price (more than 0).");
+    const buy = +bcBuy;
+    if (bcBuy.trim() !== "" && !(buy >= 0)) return notify("Enter a valid buy price (or leave it blank).");
+    // Same duplicate guards as Inventory: one name, and each barcode owned by exactly one product.
+    const nameClash = items.find((i) => normName(i.name) === normName(name));
+    if (nameClash) return notify(`“${nameClash.name}” already exists — search for it or restock instead.`);
+    const bcClash = findBarcodeClash(codes, items);
+    if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
+    const stock = Math.max(0, Math.floor(+bcStock || 0));
+    const category = guessCategory(name, items) || "Other"; // auto-corrected from the name
+    const batches = stock > 0 ? [{ id: uid(), qty: stock, expiry: "", addedOn: todayStr() }] : [];
+    const newItem = {
+      name, code: codes[0], barcodes: codes.slice(1), category, unit: "pc",
+      icon: iconFor(category), buyPrice: buy > 0 ? money(buy) : 0, sellPrice: money(sell),
+      mrp: money(sell), lowAt: 5, id: uid(), stock, batches, createdAt: todayStr(),
+    };
+    setItems((list) => [...list, newItem]);
+    pushToCart(newItem); // inventory-backed cart line (real id) → stock depletes on sale
+    log("inventory", `Added item “${name}” · ${stock} pc @ ${INR(money(sell))} · ${category} (from billing, barcode ${codes[0]})`);
+    notify(`Added “${name}” to inventory (${category}, stock ${stock}) & this bill`);
+    setBcCode(""); setBcName(""); setBcBuy(""); setBcSell(""); setBcStock("20");
+  };
+
   // Enter fires from a barcode scanner (types the value then sends Enter) or a manual search.
   // 1) Exact barcode match across ALL items → add/increment (the scan path).
   // 2) A barcode-shaped value with no exact match → "No item found" modal (don't guess).
@@ -1586,6 +1628,17 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
             <input className="input" style={{ width: 78 }} type="number" min="0" step="0.01" placeholder="₹ buy" value={miscBuy} onChange={(e) => setMiscBuy(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item buy price (optional)" title="Buy / cost price (optional) — used for profit" />
             <input className="input" style={{ width: 86 }} type="number" min="0" step="0.01" placeholder="₹ sell" value={miscPrice} onChange={(e) => setMiscPrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Misc item sell price" />
             <button className="btn" onClick={addMisc}>+ Add</button>
+          </div>
+          {/* New item: create a real catalogued product (barcode + auto category + opening stock 20)
+              straight from billing — it lands in inventory AND on this bill. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 12, padding: "8px 10px", background: "#F0F5FB", borderRadius: 8 }}>
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#3A5A7A", whiteSpace: "nowrap" }}>🏷️ New item</span>
+            <input className="input" style={{ flex: 1, minWidth: 110 }} placeholder="Barcode (scan/type)" value={bcCode} onChange={(e) => setBcCode(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { if (bcName.trim()) addBarcodeItem(); else bcNameRef.current?.focus(); } }} aria-label="New item barcode" />
+            <input ref={bcNameRef} className="input" style={{ flex: 1, minWidth: 110 }} placeholder="Item name" value={bcName} onChange={(e) => setBcName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addBarcodeItem(); }} aria-label="New item name" />
+            <input className="input" style={{ width: 70 }} type="number" min="0" step="0.01" placeholder="₹ buy" value={bcBuy} onChange={(e) => setBcBuy(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addBarcodeItem(); }} aria-label="New item buy price (optional)" title="Buy / cost price (optional) — used for profit" />
+            <input className="input" style={{ width: 78 }} type="number" min="0" step="0.01" placeholder="₹ sell" value={bcSell} onChange={(e) => setBcSell(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addBarcodeItem(); }} aria-label="New item sell price" />
+            <input className="input" style={{ width: 62 }} type="number" min="0" step="1" placeholder="Qty" value={bcStock} onChange={(e) => setBcStock(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addBarcodeItem(); }} aria-label="New item opening stock" title="Opening stock (defaults to 20)" />
+            <button className="btn" onClick={addBarcodeItem}>+ Add</button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {results.map((i) => {
@@ -1744,17 +1797,26 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
           <div style={{ fontSize: 14, color: "#465", lineHeight: 1.6 }}>
             No item in your inventory matches:
             <div style={{ margin: "10px 0", fontFamily: "monospace", fontSize: 16, fontWeight: 800, textAlign: "center", background: "#F4F7F4", padding: "10px 12px", borderRadius: 8, wordBreak: "break-all" }}>{notFound}</div>
-            Add it from <b>Inventory</b> (with this barcode) so it scans here next time.
+            Add it as a <b>new item</b> below (with this barcode) so it scans here next time.
           </div>
           <button
-            className="btn primary big" autoFocus style={{ width: "100%", marginTop: 14 }}
+            className="btn primary big" style={{ width: "100%", marginTop: 14 }}
+            onClick={() => {
+              // Hand the scanned barcode to the "New item" quick-add row and focus its name field,
+              // so an unknown scan becomes a real product (in inventory + on the bill) in one flow.
+              const code = notFound;
+              setNotFound(null); setBcCode(code); setBcName(""); setBcSell("");
+              setTimeout(() => bcNameRef.current?.focus(), 0);
+            }}>＋ Add as new item</button>
+          <button
+            className="btn big" style={{ width: "100%", marginTop: 8 }}
             onClick={(e) => {
-              // A scanner's trailing Enter (CR/LF suffix) lands on this auto-focused button and
-              // would dismiss the modal instantly. Ignore a keyboard-triggered click (e.detail === 0)
-              // in the first moment after it opens; a real mouse/touch tap (detail ≥ 1) always closes.
+              // A scanner's trailing Enter (CR/LF suffix) lands on a focused button and would dismiss
+              // the modal instantly. Ignore a keyboard-triggered click (e.detail === 0) in the first
+              // moment after it opens; a real mouse/touch tap (detail ≥ 1) always closes.
               if (e.detail === 0 && Date.now() - notFoundAt.current < 600) return;
               setNotFound(null); searchRef.current?.focus();
-            }}>OK</button>
+            }}>Cancel</button>
         </Modal>
       )}
     </div>
