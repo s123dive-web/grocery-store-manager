@@ -1471,9 +1471,11 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
   // misc line, this registers a REAL inventory item with an opening stock of 20 and a category
   // auto-guessed from the name, so the shop's catalogue grows as it bills. The cart line is
   // inventory-backed (real id), so completing the sale depletes that stock (20 → 19 …) like any item.
+  // Cost/buy price defaults to 80% of the sell price (≈20% margin), since this row has no buy field.
   // If the name/barcode already belongs to a catalogued item, that item is billed instead — no
   // duplicate is created and no extra stock is added.
-  const OPENING_STOCK = 20;
+  const OPENING_STOCK = 20;     // opening stock for a quick-catalogued item
+  const BUY_PRICE_RATIO = 0.8;  // default cost = 80% of sell price (≈20% margin)
   const addMisc = () => {
     const price = +miscPrice;
     if (!(price > 0)) return notify("Enter a price for the item.");
@@ -1493,15 +1495,16 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
     const bcClash = findBarcodeClash(codes, items);
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const category = guessCategory(name, items) || "Other"; // auto-corrected from the name
+    const sell = money(price);
     const batches = [{ id: uid(), qty: OPENING_STOCK, expiry: "", addedOn: todayStr() }];
     const newItem = {
       name, code: codes[0] || "", barcodes: codes.slice(1), category, unit: "pc",
-      icon: iconFor(category), buyPrice: 0, sellPrice: money(price), mrp: money(price),
+      icon: iconFor(category), buyPrice: money(sell * BUY_PRICE_RATIO), sellPrice: sell, mrp: sell,
       lowAt: 5, id: uid(), stock: OPENING_STOCK, batches, createdAt: todayStr(),
     };
     setItems((list) => [...list, newItem]);
     pushToCart(newItem); // inventory-backed cart line (real id) → stock depletes on sale
-    log("inventory", `Added item “${name}” · ${OPENING_STOCK} pc @ ${INR(money(price))} · ${category} (from billing${codes[0] ? `, barcode ${codes[0]}` : ""})`);
+    log("inventory", `Added item “${name}” · ${OPENING_STOCK} pc @ ${INR(sell)} (cost ${INR(newItem.buyPrice)}) · ${category} (from billing${codes[0] ? `, barcode ${codes[0]}` : ""})`);
     notify(`Added “${name}” to inventory (${category}, stock ${OPENING_STOCK}) & this bill`);
     setMiscName(""); setMiscPrice(""); setMiscCode("");
   };
