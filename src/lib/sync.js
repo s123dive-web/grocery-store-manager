@@ -124,6 +124,15 @@ export function subscribeSlice(slice, onData, onError) {
   return onValue(ref(db, path(slice)), (snap) => onData(snap.val()), onError);
 }
 
+// ---------- store config (singleton) ----------
+// Store identity (shop name, address, logo, PC IP …) is ONE object shared by the shop, not a
+// keyed collection of records, so it skips the per-record map/merge machinery above and is read
+// and written whole at shop/config. Last write wins — fine for a setting a single owner edits.
+const CONFIG_PATH = "shop/config";
+export const subscribeConfig = (onData, onError) =>
+  onValue(ref(db, CONFIG_PATH), (snap) => onData(snap.val()), onError);
+export const writeConfig = (config) => set(ref(db, CONFIG_PATH), sanitize(config));
+
 // Live online/offline signal from the RTDB client. cb(true|false).
 export function subscribeConnection(cb) {
   return onValue(

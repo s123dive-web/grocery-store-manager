@@ -10,6 +10,7 @@ import { auth } from "./lib/firebase.js";
 import {
   toMap, mapToArray, isLegacyShape, buildSliceUpdate, mergeRemote,
   writeSlice, overwriteSlice, subscribeSlice, subscribeConnection,
+  subscribeConfig, writeConfig,
 } from "./lib/sync.js";
 import { parseFile, parseRawText } from "./lib/parse.js";
 import { itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, parseBarcodeText, withBarcodeSep, looksLikeBarcode } from "./lib/barcodes.js";
@@ -96,7 +97,11 @@ function printHtml(html, title) {
 // l.price, l.amount, sale.total, discount, payment …) is read straight off the sale and merely
 // laid out for a 72mm (80mm paper) ESC/POS thermal printer. See printHtml() for the print
 // mechanism (isolated iframe document → no app-UI leakage).
-function printReceipt(sale) {
+function printReceipt(sale, store = STORE) {
+  // Custom logo/QR are stored as data URLs (already absolute); the bundled fallbacks are
+  // relative /public assets that must be made absolute for the print iframe (about:blank).
+  const logoUrl = store.logo ? store.logo : assetUrl(LOGO_SRC);
+  const qrUrl = store.paymentQr ? store.paymentQr : assetUrl(PAYMENT_QR_SRC);
   const rows = sale.lines
     .map((l) => {
       // Unit-price subline under the name: preserves the "unit price" field without a 4th column.
@@ -147,9 +152,10 @@ function printReceipt(sale) {
     .qr img { width:40mm; height:40mm; object-fit:contain; }
     .qr .cap { font-size:11px; font-weight:700; margin-top:1mm; }
     </style>
-    <img class="logo" src="${assetUrl(LOGO_SRC)}" alt="" onerror="this.style.display='none'" />
-    <div class="shop">${escapeHtml(STORE.name)}</div>
-    <div class="addr">${escapeHtml(STORE.address)}</div>
+    <img class="logo" src="${logoUrl}" alt="" onerror="this.style.display='none'" />
+    <div class="shop">${escapeHtml(store.name)}</div>
+    <div class="addr">${escapeHtml(store.address)}</div>
+    ${store.phone ? `<div class="addr">☎ ${escapeHtml(store.phone)}</div>` : ""}
     <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
     <div class="rule"></div>
     <table class="items">${rows}
@@ -163,7 +169,7 @@ function printReceipt(sale) {
     <div class="rule"></div>
     <div class="ft">Thank you! Please visit again.</div>
     <div class="qr">
-      <img src="${assetUrl(PAYMENT_QR_SRC)}" alt="Scan to pay" onerror="this.style.display='none'" />
+      <img src="${qrUrl}" alt="Scan to pay" onerror="this.style.display='none'" />
       <div class="cap">Scan to Pay · PhonePe / UPI</div>
     </div>`,
     "Receipt"
@@ -538,16 +544,88 @@ const SEED_ITEMS = [
 }));
 
 // Categories of activity recorded in the global Activity Log.
-const LOG_TYPES = ["sale", "inventory", "expense", "import", "backup", "bill"];
+const LOG_TYPES = ["sale", "inventory", "expense", "import", "backup", "bill", "settings"];
 
-// Store identity. Address/locality verified (Nancy Hill View is a real complex in
-// Baner, Pune 411021); phone left blank rather than invented.
+// Store identity — DEFAULTS only. Every field here can be overridden by the owner from
+// Other → Store Settings; the saved config lives at shop/config (see effectiveStore()) and
+// syncs across devices. Address/locality verified (Nancy Hill View is a real complex in
+// Baner, Pune 411021); phone left blank rather than invented. `logo`/`paymentQr` blank => the
+// bundled /public asset is used; a custom upload is stored inline as a data URL. `pcIp` is the
+// shop billing PC's LAN address (e.g. for reaching a local print server on the counter PC).
 const STORE = {
   name: "Prakash Super Mart",
   tagline: "Groceries & Daily Needs",
   address: "Shop No. 16, Nancy Hill View, Baner, Pune 411021",
   phone: "",
+  pcIp: "",
+  logo: "",       // "" => default logo.jpg asset; otherwise a data URL
+  paymentQr: "",  // "" => default payment-qr.jpg asset; otherwise a data URL
 };
+
+// localStorage key + reader for the store config. Cached separately from the data cache so the
+// pre-auth Login screen can brand itself with the owner's saved shop name/logo instantly.
+const CONFIG_CACHE_KEY = "psm-config-v1";
+const readCachedConfig = () => {
+  try { const c = JSON.parse(localStorage.getItem(CONFIG_CACHE_KEY) || "null"); return c && typeof c === "object" ? c : {}; }
+  catch { return {}; }
+};
+
+// Built-in defaults with any owner-set config layered on. A blank/whitespace config field falls
+// back to the default so the header and receipt are never left empty. logo/paymentQr keep "" when
+// unset (callers fall back to the bundled asset). Used everywhere the store identity is shown.
+function effectiveStore(config = {}) {
+  const pick = (v, d) => (typeof v === "string" && v.trim() ? v : d);
+  return {
+    name: pick(config.name, STORE.name),
+    tagline: pick(config.tagline, STORE.tagline),
+    address: pick(config.address, STORE.address),
+    phone: pick(config.phone, STORE.phone),
+    pcIp: pick(config.pcIp, STORE.pcIp),
+    logo: pick(config.logo, ""),
+    paymentQr: pick(config.paymentQr, ""),
+  };
+}
+
+// A blank string, or a dotted IPv4 (each octet 0-255), optionally with a :port. Used to keep the
+// shop PC IP field sane before saving. Hostnames aren't accepted — the field is labelled "IP".
+const isValidPcIp = (s) => {
+  const v = (s || "").trim();
+  if (!v) return true;
+  const [host, port, ...rest] = v.split(":");
+  if (rest.length) return false;
+  if (port !== undefined && !/^\d{1,5}$/.test(port)) return false;
+  const oct = host.split(".");
+  return oct.length === 4 && oct.every((o) => /^\d{1,3}$/.test(o) && +o >= 0 && +o <= 255);
+};
+
+// Read an <input type=file> image and return a downscaled JPEG data URL (fit within maxDim, white
+// background so transparency doesn't print black on the thermal receipt). Downscaling keeps the
+// stored logo/QR at a few KB — small enough to live inline in RTDB config + localStorage, instead
+// of shipping the full-resolution file to every device.
+function imageFileToDataUrl(file, maxDim, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type || !file.type.startsWith("image/")) return reject(new Error("Not an image file"));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read the file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Could not decode the image"));
+      img.onload = () => {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 // ---------- stock / expiry batch helpers ----------
 // Each item tracks stock as dated batches { id, qty, expiry, addedOn }; `stock` is the
@@ -621,6 +699,10 @@ function Login() {
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
+  // Brand the sign-in card with the owner's saved settings (from the local cache — the cloud
+  // config lives behind auth, so this is the best we have pre-login). Falls back to defaults.
+  const store = effectiveStore(readCachedConfig());
+  const loginLogo = store.logo || LOGO_SRC;
 
   const submit = async (e) => {
     e?.preventDefault();
@@ -647,10 +729,10 @@ function Login() {
       <style>{CSS}</style>
       <form onSubmit={submit} style={{ background: "#fff", borderRadius: 16, padding: "26px 24px", width: "min(380px, 94vw)", boxShadow: "0 12px 40px rgba(0,0,0,.3)" }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <img src={LOGO_SRC} alt="Prakash Super Mart" style={{ width: 52, height: 52, borderRadius: 12, objectFit: "contain", flexShrink: 0 }} />
+          <img src={loginLogo} alt={store.name} style={{ width: 52, height: 52, borderRadius: 12, objectFit: "contain", flexShrink: 0 }} />
           <div>
-            <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>{STORE.name}</div>
-            <div style={{ fontSize: 11.5, color: "#8A9C90" }}>{STORE.address}</div>
+            <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>{store.name}</div>
+            <div style={{ fontSize: 11.5, color: "#8A9C90" }}>{store.address}</div>
           </div>
         </div>
         <h2 style={{ fontSize: 16, margin: "18px 0 12px" }}>Sign in</h2>
@@ -710,6 +792,7 @@ const OTHER_TABS = [
   ["barcode", "▥", "Barcode Creator"],
   ["logs", "❑", "Activity Log"],
   ["changelog", "🗒", "App Change Log"],
+  ["settings", "🏪", "Store Settings"],
   ["admin", "⚙", "Admin"],
 ];
 
@@ -728,6 +811,9 @@ function StoreManager({ user, onLogout }) {
     try { const c = JSON.parse(localStorage.getItem(CUSTOM_CATS_KEY) || "[]"); return Array.isArray(c) ? c.filter((x) => typeof x === "string") : []; }
     catch { return []; }
   });
+  // Store identity/branding (shop name, address, logo, PC IP …). A singleton synced at
+  // shop/config — see the dedicated effect below. Seeded from the local cache for instant paint.
+  const [config, setConfig] = useState(() => readCachedConfig());
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -741,6 +827,8 @@ function StoreManager({ user, onLogout }) {
   const lastRemote = useRef({ items: {}, sales: {}, expenses: {}, logs: {}, vendorBills: {}, dailyBills: {} }); // last cloud map per slice
   const synced = useRef({ items: false, sales: false, expenses: false, logs: false, vendorBills: false, dailyBills: false });
   const seeded = useRef(false);
+  const configSynced = useRef(false);        // have we read shop/config from the cloud at least once?
+  const lastConfig = useRef(JSON.stringify(readCachedConfig())); // last config JSON reconciled with the cloud (blocks echo writes)
   const [online, setOnline] = useState(true);
 
   // Always-current local state, readable from inside async listeners (for the merge).
@@ -821,6 +909,37 @@ function StoreManager({ user, onLogout }) {
   useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("vendorBills", bills), 300); return () => clearTimeout(t); }, [bills, loaded, pushSlice]);
   useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("dailyBills", dailyBills), 300); return () => clearTimeout(t); }, [dailyBills, loaded, pushSlice]);
 
+  // 3b) Store config is a singleton, not a keyed slice — subscribe/write it whole. Incoming
+  //     cloud values update state and the pre-auth cache; local edits push back (the lastConfig
+  //     guard skips the echo write when the change we're seeing is the one we just received).
+  useEffect(() => {
+    const unsub = subscribeConfig(
+      (val) => {
+        configSynced.current = true;
+        const next = val && typeof val === "object" ? val : {};
+        lastConfig.current = JSON.stringify(next);
+        setConfig(next);
+        try { localStorage.setItem(CONFIG_CACHE_KEY, lastConfig.current); } catch (e) { console.error("config cache write failed", e); }
+      },
+      (err) => { console.error("config sync read failed", err); }
+    );
+    return () => unsub();
+  }, []);
+  useEffect(() => {
+    if (!loaded || !configSynced.current) return;
+    const s = JSON.stringify(config ?? {});
+    try { localStorage.setItem(CONFIG_CACHE_KEY, s); } catch (e) { console.error("config cache write failed", e); }
+    if (s === lastConfig.current) return; // echo of a value we already have in the cloud
+    const t = setTimeout(() => {
+      lastConfig.current = s;
+      writeConfig(config).catch((e) => {
+        console.error("config sync write failed", e);
+        notify("⚠ Couldn't sync settings — saved on this device, will retry when back online.");
+      });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [config, loaded]);
+
   // 4) Mirror to a local cache (instant next paint + offline reads + no data loss on close).
   useEffect(() => {
     if (!loaded) return;
@@ -850,6 +969,10 @@ function StoreManager({ user, onLogout }) {
   // built-ins and any category already on an item.
   useEffect(() => { try { localStorage.setItem(CUSTOM_CATS_KEY, JSON.stringify(customCats)); } catch (e) { console.error("custom cats write failed", e); } }, [customCats]);
   const cats = useMemo(() => catList(items, customCats), [items, customCats]);
+
+  // Effective store identity (defaults + owner config). Drives the sidebar brand, the receipt,
+  // and anywhere the shop name/logo/address appears.
+  const store = useMemo(() => effectiveStore(config), [config]);
 
   // Prompt for and add a new category. Returns the canonical name to select (existing match if it's
   // a duplicate, the new name otherwise), or null if cancelled/blank. Used by the Add/Edit forms.
@@ -942,10 +1065,10 @@ function StoreManager({ user, onLogout }) {
       {/* sidebar */}
       <nav className="nav" style={S.nav}>
         <div style={S.logo}>
-          <img src={LOGO_SRC} alt="Prakash Super Mart" style={{ width: 42, height: 42, borderRadius: 10, objectFit: "contain", background: "#fff", padding: 2, flexShrink: 0 }} />
+          <img src={store.logo || LOGO_SRC} alt={store.name} style={{ width: 42, height: 42, borderRadius: 10, objectFit: "contain", background: "#fff", padding: 2, flexShrink: 0 }} />
           <div>
-            <div style={{ fontWeight: 800, fontSize: 14.5, letterSpacing: "-0.02em" }}>{STORE.name}</div>
-            <div style={{ fontSize: 10.5, color: "#9DB5A8", lineHeight: 1.3 }}>{STORE.address}</div>
+            <div style={{ fontWeight: 800, fontSize: 14.5, letterSpacing: "-0.02em" }}>{store.name}</div>
+            <div style={{ fontSize: 10.5, color: "#9DB5A8", lineHeight: 1.3 }}>{store.address}</div>
           </div>
         </div>
         {TOP_TABS.filter(([k]) => tabEnabled(k)).map(([k, ic, label]) => (
@@ -1007,7 +1130,7 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "dashboard" ? (
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         ) : tab === "billing" ? (
-          <Billing items={items} sales={sales} setItems={setItems} setSales={setSales} notify={notify} log={addLog} />
+          <Billing items={items} sales={sales} setItems={setItems} setSales={setSales} store={store} notify={notify} log={addLog} />
         ) : tab === "raw" ? (
           <RawData items={items} setItems={setItems} setSales={setSales} setExpenses={setExpenses} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
@@ -1015,9 +1138,9 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "alerts" ? (
           <Alerts items={items} goInventory={() => setTab("inventory")} cats={cats} />
         ) : tab === "barcode" ? (
-          <BarcodeCreator items={items} setItems={setItems} notify={notify} log={addLog} />
+          <BarcodeCreator items={items} setItems={setItems} store={store} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
-          <SalesHistory sales={sales} items={items} setSales={setSales} setItems={setItems} notify={notify} log={addLog} />
+          <SalesHistory sales={sales} items={items} setSales={setSales} setItems={setItems} store={store} notify={notify} log={addLog} />
         ) : tab === "finance" && tabEnabled("finance") ? (
           <Finance sales={sales} expenses={expenses} />
         ) : tab === "stats" ? (
@@ -1034,6 +1157,8 @@ function StoreManager({ user, onLogout }) {
           <Logs logs={logs} setLogs={setLogs} notify={notify} />
         ) : tab === "changelog" ? (
           <Changelog />
+        ) : tab === "settings" ? (
+          <StoreConfig config={config} setConfig={setConfig} notify={notify} log={addLog} />
         ) : tab === "admin" ? (
           <Admin items={items} setItems={setItems} setSales={setSales} setExpenses={setExpenses} setLogs={setLogs} user={user} notify={notify} log={addLog} />
         ) : (
@@ -1315,7 +1440,7 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
 }
 
 // ---------- Billing / POS ----------
-function Billing({ items, sales, setItems, setSales, notify, log }) {
+function Billing({ items, sales, setItems, setSales, store = STORE, notify, log }) {
   const [q, setQ] = useState("");
   const [cart, setCart] = useState([]); // {id, name, icon, unit, sellPrice, buyPrice, qty}
   const [lastSale, setLastSale] = useState(null);
@@ -1656,7 +1781,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
           {cart.length === 0 ? (
             <Empty text="Bill is empty. Tap items on the left to add.">
               {lastSale && (
-                <button className="btn" onClick={() => printReceipt(lastSale)}>🖨 Print last bill · {INR(lastSale.total)}</button>
+                <button className="btn" onClick={() => printReceipt(lastSale, store)}>🖨 Print last bill · {INR(lastSale.total)}</button>
               )}
             </Empty>
           ) : (
@@ -1759,7 +1884,7 @@ function Billing({ items, sales, setItems, setSales, notify, log }) {
               )}
               {pay === "UPI" && (
                 <div style={{ textAlign: "center", marginTop: 10, padding: 8, background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10 }}>
-                  <img src={PAYMENT_QR_SRC} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain" }} />
+                  <img src={store.paymentQr || PAYMENT_QR_SRC} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain" }} />
                   <div style={{ fontSize: 11.5, fontWeight: 700, color: "#3A5547" }}>Scan to Pay · PhonePe / UPI</div>
                 </div>
               )}
@@ -2399,7 +2524,7 @@ function barcodeDataUrl(value, format) {
   return canvas.toDataURL("image/png");
 }
 
-function BarcodeCreator({ items, setItems, notify, log }) {
+function BarcodeCreator({ items, setItems, store = STORE, notify, log }) {
   const [itemId, setItemId] = useState("");
   const [name, setName] = useState("");
   const [code, setCode] = useState(genCode("CODE128"));
@@ -2473,7 +2598,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
     const priceLine = [mrp ? "MRP ₹" + escapeHtml(String(mrp)) : "", sell ? "Sell ₹" + escapeHtml(String(sell)) : ""].filter(Boolean).join("&nbsp;&nbsp;");
     const dateLine = [pkd ? "PKD " + mmYY(pkd) : "", exp ? "EXP " + mmYY(exp) : ""].filter(Boolean).join("&nbsp;&nbsp;");
     const one = `<div class="lbl">
-      <div class="store">${escapeHtml(STORE.name)}</div>
+      <div class="store">${escapeHtml(store.name)}</div>
       <div class="pname">${escapeHtml(name || "")}</div>
       <img src="${url}" />
       ${priceLine ? `<div class="price">${priceLine}</div>` : ""}
@@ -2572,7 +2697,7 @@ function BarcodeCreator({ items, setItems, notify, log }) {
               width: 230, minHeight: 130, border: "1px dashed #cfcfcf", borderRadius: 6, padding: "8px 10px",
               display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between", textAlign: "center", background: "#fff",
             }}>
-              <div style={{ fontSize: 10, fontWeight: 800, color: "#10331F" }}>{STORE.name}</div>
+              <div style={{ fontSize: 10, fontWeight: 800, color: "#10331F" }}>{store.name}</div>
               <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.1 }}>{name || <span style={{ color: "#AAB" }}>Product name</span>}</div>
               <svg ref={svgRef} style={{ maxWidth: "100%" }} />
               {(mrp || sell) ? (
@@ -2917,7 +3042,7 @@ function RawData({ items, setItems, setSales, setExpenses, notify, log }) {
 // ---------- Sales history ----------
 const PAY_COLORS = { UPI: "#2A6FB0", Cash: "#1B5E43", Udhari: "#C44536" };
 
-function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
+function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify, log }) {
   const [open, setOpen] = useState(null);
   const [openDates, setOpenDates] = useState(() => new Set()); // expanded past dates (today is always open)
   const [from, setFrom] = useState("");
@@ -3203,7 +3328,7 @@ function SalesHistory({ sales, items, setSales, setItems, notify, log }) {
                     </div>
                   )}
                   <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                    <button className="btn small" onClick={() => printReceipt(s)}>🖨 Print</button>
+                    <button className="btn small" onClick={() => printReceipt(s, store)}>🖨 Print</button>
                     <button className="btn small ghost" onClick={() => openEdit(s)}>✎ Edit bill</button>
                     <button className="btn small ghost" onClick={() => openSplit(s)}>✂ Split</button>
                     <button className="btn small danger" onClick={() => deleteSale(s)}>🗑 Delete</button>
@@ -5152,6 +5277,155 @@ function Expenses({ expenses, setExpenses, notify, log }) {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+// ---------- Store Settings (configurable shop identity + branding) ----------
+// The shop name, tagline, address, phone, logo, payment QR and counter-PC IP that used to be
+// hard-coded now live in `config` (synced at shop/config across every device). This screen edits
+// a local draft and commits it via setConfig on Save; effectiveStore() layers it over the
+// built-in defaults everywhere the identity is shown (sidebar, login card, printed receipt).
+function StoreConfig({ config, setConfig, notify, log }) {
+  const toDraft = (c = {}) => ({
+    name: c.name || "", tagline: c.tagline || "", address: c.address || "",
+    phone: c.phone || "", pcIp: c.pcIp || "", logo: c.logo || "", paymentQr: c.paymentQr || "",
+  });
+  const [draft, setDraft] = useState(() => toDraft(config));
+  const [busyKey, setBusyKey] = useState(""); // "logo" | "paymentQr" while an upload is processed
+  const savedRef = useRef(JSON.stringify(toDraft(config))); // last-saved snapshot (drives the dirty flag)
+  const dirty = JSON.stringify(draft) !== savedRef.current;
+
+  // Adopt an incoming cloud config (edited on another device) — but never clobber unsaved local
+  // edits: only reset the draft when it still matches the last snapshot we saved/loaded.
+  useEffect(() => {
+    setDraft((d) => (JSON.stringify(d) === savedRef.current ? toDraft(config) : d));
+    savedRef.current = JSON.stringify(toDraft(config));
+  }, [config]);
+
+  const set = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+
+  const onImage = async (e, key, maxDim) => {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file after a remove
+    if (!f) return;
+    setBusyKey(key);
+    try {
+      set(key, await imageFileToDataUrl(f, maxDim));
+    } catch (err) {
+      console.error("image read failed", err);
+      notify("⚠ " + (err.message || "Couldn't read that image"));
+    } finally {
+      setBusyKey("");
+    }
+  };
+
+  const save = () => {
+    if (draft.pcIp.trim() && !isValidPcIp(draft.pcIp)) {
+      return notify("⚠ Enter a valid IP like 192.168.1.50 (or 192.168.1.50:9100), or leave it blank");
+    }
+    const next = {
+      name: draft.name.trim(), tagline: draft.tagline.trim(), address: draft.address.trim(),
+      phone: draft.phone.trim(), pcIp: draft.pcIp.trim(), logo: draft.logo || "", paymentQr: draft.paymentQr || "",
+    };
+    const snap = toDraft(next);
+    savedRef.current = JSON.stringify(snap);
+    setDraft(snap);
+    setConfig(next);
+    log?.("settings", "Updated store settings");
+    notify("✓ Store settings saved");
+  };
+
+  const resetDefaults = () => {
+    if (!confirm("Reset every store setting back to the app defaults? A custom logo and payment QR will be removed.")) return;
+    const snap = toDraft({});
+    savedRef.current = JSON.stringify(snap);
+    setDraft(snap);
+    setConfig({});
+    log?.("settings", "Reset store settings to defaults");
+    notify("Store settings reset to defaults");
+  };
+
+  const kb = (dataUrl) => (dataUrl ? Math.round(dataUrl.length / 1024) : 0);
+
+  // A logo / QR uploader with live preview, size read-out, and a "use default" reset.
+  const ImageField = ({ label, keyName, maxDim, fallback, hint }) => (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: "#465", marginBottom: 6 }}>{label}</div>
+      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        <img
+          src={draft[keyName] || fallback}
+          alt={label}
+          style={{ width: 64, height: 64, borderRadius: 10, objectFit: "contain", background: "#fff", border: "1px solid #E2EAE3", padding: 3, flexShrink: 0 }}
+        />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <label className="btn small ghost" style={{ cursor: "pointer" }}>
+              {busyKey === keyName ? "Processing…" : draft[keyName] ? "Replace…" : "Upload…"}
+              <input type="file" accept="image/*" onChange={(e) => onImage(e, keyName, maxDim)} style={{ display: "none" }} disabled={busyKey === keyName} />
+            </label>
+            {draft[keyName] && (
+              <button className="btn small ghost" onClick={() => set(keyName, "")}>Use default</button>
+            )}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 5 }}>
+            {draft[keyName] ? `Custom image · ~${kb(draft[keyName])} KB` : "Using the built-in default"}
+            {hint ? <> · {hint}</> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <Header title="Store Settings" sub="Shop name, address, logo and other details used across the app and on printed receipts.">
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {dirty && <span style={{ fontSize: 12, color: "#C9803A", fontWeight: 600 }}>Unsaved changes</span>}
+          <button className="btn ghost" onClick={resetDefaults}>Reset to defaults</button>
+          <button className="btn primary big" onClick={save} disabled={!dirty}>Save settings</button>
+        </div>
+      </Header>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+        <section style={S.panel}>
+          <div style={S.panelHead}>Shop identity</div>
+          <Field label="Shop name"><input className="input" value={draft.name} placeholder={STORE.name} onChange={(e) => set("name", e.target.value)} /></Field>
+          <Field label="Tagline"><input className="input" value={draft.tagline} placeholder={STORE.tagline} onChange={(e) => set("tagline", e.target.value)} /></Field>
+          <Field label="Address"><textarea className="input" rows={3} style={{ resize: "vertical" }} value={draft.address} placeholder={STORE.address} onChange={(e) => set("address", e.target.value)} /></Field>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Phone"><input className="input" type="tel" value={draft.phone} placeholder="e.g. +91 98765 43210" onChange={(e) => set("phone", e.target.value)} /></Field>
+            <Field label="Shop PC IP address">
+              <input className="input" value={draft.pcIp} placeholder="e.g. 192.168.1.50" onChange={(e) => set("pcIp", e.target.value)} />
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: -2 }}>
+            The counter PC's address on the shop's local network — used to reach a local print server / POS on that machine.
+            Accepts a plain IPv4, optionally with a port (e.g. <code>192.168.1.50:9100</code>).
+          </div>
+        </section>
+
+        <section style={S.panel}>
+          <div style={S.panelHead}>Branding &amp; receipt</div>
+          <ImageField label="Shop logo" keyName="logo" maxDim={240} fallback={LOGO_SRC} hint="shown in the sidebar, on the sign-in card and at the top of receipts" />
+          <ImageField label="Payment QR (receipt)" keyName="paymentQr" maxDim={480} fallback={PAYMENT_QR_SRC} hint="printed at the bottom of every receipt" />
+          <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 4, lineHeight: 1.5 }}>
+            Images are automatically resized and stored with your shop data, so they sync to every signed-in device. Leave a field on “default” to keep the bundled image.
+          </div>
+        </section>
+      </div>
+
+      <section style={{ ...S.panel, marginTop: 16 }}>
+        <div style={S.panelHead}>Receipt preview</div>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <img src={draft.logo || LOGO_SRC} alt="" style={{ width: 48, height: 48, borderRadius: 10, objectFit: "contain", background: "#fff", border: "1px solid #E2EAE3", padding: 3 }} />
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>{draft.name.trim() || STORE.name}</div>
+            <div style={{ fontSize: 12.5, color: "#6B7E74", whiteSpace: "pre-line" }}>{draft.address.trim() || STORE.address}</div>
+            {draft.phone.trim() && <div style={{ fontSize: 12.5, color: "#6B7E74" }}>☎ {draft.phone.trim()}</div>}
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
