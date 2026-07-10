@@ -5,6 +5,7 @@ import {
   XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, Legend,
 } from "recharts";
 import JsBarcode from "jsbarcode";
+import qrcode from "qrcode-generator";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail, EmailAuthProvider, reauthenticateWithCredential } from "firebase/auth";
 import { auth } from "./lib/firebase.js";
 import {
@@ -47,6 +48,10 @@ const dateStr = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayStr = () => dateStr(new Date());
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+// A short, human-readable bill reference derived from the (already-unique) sale id: last 6 chars,
+// upper-cased. Printed on the receipt AND stamped into the UPI note so a received payment can be
+// matched back to its bill. Unique enough for a shop's day-to-day reconciliation.
+const billRef = (sale) => String((sale && sale.id) || "").slice(-6).toUpperCase();
 const escapeHtml = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -57,6 +62,48 @@ const BASE = import.meta.env.BASE_URL;
 const LOGO_SRC = BASE + "logo.jpg";
 const PAYMENT_QR_SRC = BASE + "payment-qr.jpg";
 const assetUrl = (p) => (typeof location !== "undefined" ? location.origin : "") + p;
+
+// Build a UPI "pay" deep link (upi://pay?…). Encoding an amount (am=) makes the customer's UPI
+// app (PhonePe/GPay/Paytm…) open with the bill total already filled in — they just confirm & pay.
+// Returns "" when there's no VPA to pay to (caller then falls back to the static QR image).
+// Spaces are %20-encoded via encodeURIComponent (NOT "+") — some UPI apps read a literal "+" in
+// the payee name / note instead of treating it as a space.
+function upiPayUri({ vpa, name, amount, note } = {}) {
+  const pa = (vpa || "").trim();
+  if (!pa) return "";
+  // pa (the VPA) is left raw — UPI apps expect a literal "@" here, not "%40"; the field is
+  // charset-validated (isValidUpiId) before it's ever saved. pn/tn are free text → encoded.
+  const parts = [`pa=${pa}`];
+  const pn = (name || "").trim();
+  if (pn) parts.push(`pn=${encodeURIComponent(pn)}`);
+  const am = Number(amount);
+  if (Number.isFinite(am) && am > 0) parts.push(`am=${am.toFixed(2)}`);
+  parts.push("cu=INR");
+  const tn = (note || "").trim();
+  if (tn) parts.push(`tn=${encodeURIComponent(tn)}`);
+  return "upi://pay?" + parts.join("&");
+}
+
+// Render text to a QR as a data-URL image (GIF), generated locally — nothing leaves the device.
+// cellSize = pixels per module, margin = quiet-zone modules (min 2 so scanners lock on). Kept
+// small; callers upscale the <img> with image-rendering:pixelated so it stays crisp on screen and
+// on the 203dpi thermal head. Level "M" tolerates ~15% smudging on cheap receipt paper. typeNumber
+// 0 auto-sizes to the smallest version that fits the string.
+function qrDataUrl(text, cellSize = 6, margin = 2) {
+  const qr = qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  return qr.createDataURL(cellSize, margin);
+}
+
+// A blank string, or a UPI VPA like prakashmart@okhdfcbank / 9876543210@ybl: a permissive handle
+// (letters, digits, dot, hyphen, underscore) before an alphanumeric bank/PSP suffix that starts
+// with a letter. Used to sanity-check the field before saving; blank is allowed (feature is off).
+const isValidUpiId = (s) => {
+  const v = (s || "").trim();
+  if (!v) return true;
+  return /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z][a-zA-Z0-9]{1,63}$/.test(v);
+};
 
 // Print an HTML document via a hidden iframe. Mobile browsers block window.open popups,
 // so the old "open a new window and print" approach silently failed on phones — an iframe
@@ -101,7 +148,14 @@ function printReceipt(sale, store = STORE) {
   // Custom logo/QR are stored as data URLs (already absolute); the bundled fallbacks are
   // relative /public assets that must be made absolute for the print iframe (about:blank).
   const logoUrl = store.logo ? store.logo : assetUrl(LOGO_SRC);
-  const qrUrl = store.paymentQr ? store.paymentQr : assetUrl(PAYMENT_QR_SRC);
+  const ref = billRef(sale);
+  // Dynamic UPI QR: when a VPA is configured, encode this bill's exact total so the customer's app
+  // opens with the amount pre-filled. The bill ref rides along as the payment note (tn) so an
+  // incoming UPI payment can be reconciled against this printed receipt. Otherwise fall back to the
+  // fixed payment-QR image. `dynQr` also drives the caption + pixelated rendering below.
+  const upiUri = upiPayUri({ vpa: store.upiId, name: store.upiName || store.name, amount: sale.total, note: ref ? "Bill " + ref : store.name });
+  const dynQr = !!upiUri;
+  const qrUrl = dynQr ? qrDataUrl(upiUri) : store.paymentQr ? store.paymentQr : assetUrl(PAYMENT_QR_SRC);
   const rows = sale.lines
     .map((l) => {
       // Unit-price subline under the name: preserves the "unit price" field without a 4th column.
@@ -150,13 +204,16 @@ function printReceipt(sale, store = STORE) {
     .ft { text-align:center; font-size:12px; margin-top:2mm; }
     .qr { text-align:center; margin-top:3mm; }
     .qr img { width:40mm; height:40mm; object-fit:contain; }
+    /* A locally-generated QR is a tiny raster upscaled to 40mm — nearest-neighbour keeps the
+       modules square and sharp on the thermal head. Not applied to a photo/uploaded QR image. */
+    .qr img.gen { image-rendering: pixelated; image-rendering: crisp-edges; }
     .qr .cap { font-size:11px; font-weight:700; margin-top:1mm; }
     </style>
     <img class="logo" src="${logoUrl}" alt="" onerror="this.style.display='none'" />
     <div class="shop">${escapeHtml(store.name)}</div>
     <div class="addr">${escapeHtml(store.address)}</div>
     ${store.phone ? `<div class="addr">☎ ${escapeHtml(store.phone)}</div>` : ""}
-    <div class="meta">${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
+    <div class="meta">${ref ? `Bill #${escapeHtml(ref)} &nbsp; ` : ""}${escapeHtml(sale.date)} &nbsp; ${escapeHtml(sale.time)}</div>
     <div class="rule"></div>
     <table class="items">${rows}
     ${sale.discount > 0 ? `<tr><td class="col-name">Subtotal</td><td class="col-qty"></td><td class="col-amt">${INR(sale.subtotal != null ? sale.subtotal : money((sale.total || 0) + sale.discount))}</td></tr>
@@ -169,10 +226,31 @@ function printReceipt(sale, store = STORE) {
     <div class="rule"></div>
     <div class="ft">Thank you! Please visit again.</div>
     <div class="qr">
-      <img src="${qrUrl}" alt="Scan to pay" onerror="this.style.display='none'" />
-      <div class="cap">Scan to Pay · PhonePe / UPI</div>
+      <img class="${dynQr ? "gen" : ""}" src="${qrUrl}" alt="Scan to pay" onerror="this.style.display='none'" />
+      <div class="cap">Scan to Pay${dynQr ? " " + INR(sale.total) : ""} · PhonePe / UPI</div>
     </div>`,
     "Receipt"
+  );
+}
+
+// The Scan-to-Pay QR shown live in the billing panel while payment = UPI. When a UPI ID is set it
+// renders an amount-encoded QR (regenerated as the cart total changes) so the customer's app opens
+// pre-filled; otherwise it shows the fixed payment-QR image, exactly as before. `amount` is the
+// live bill total — 0 (empty cart) drops the `am` param, showing a plain pay-to-shop QR.
+function UpiQrPreview({ store, amount }) {
+  // No note here: the sale isn't created until "Complete sale", so there's no bill ref yet. The
+  // printed receipt (printReceipt) is where the bill ref gets stamped into the UPI note.
+  const uri = upiPayUri({ vpa: store.upiId, name: store.upiName || store.name, amount });
+  const src = useMemo(
+    () => (uri ? qrDataUrl(uri) : store.paymentQr || PAYMENT_QR_SRC),
+    [uri, store.paymentQr],
+  );
+  const amt = uri && Number(amount) > 0 ? " " + INR(amount) : "";
+  return (
+    <div style={{ textAlign: "center", marginTop: 10, padding: 8, background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10 }}>
+      <img src={src} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain", imageRendering: uri ? "pixelated" : "auto" }} />
+      <div style={{ fontSize: 11.5, fontWeight: 700, color: "#3A5547" }}>Scan to Pay{amt} · PhonePe / UPI</div>
+    </div>
   );
 }
 const UNITS = ["pc", "kg", "g", "L", "ml", "packet", "dozen", "box"];
@@ -560,6 +638,8 @@ const STORE = {
   pcIp: "",
   logo: "",       // "" => default logo.jpg asset; otherwise a data URL
   paymentQr: "",  // "" => default payment-qr.jpg asset; otherwise a data URL
+  upiId: "",      // UPI VPA (e.g. shop@okhdfcbank). Set => bills show an amount-encoded QR; "" => static image
+  upiName: "",    // payee name shown in the customer's UPI app; "" => fall back to the shop name
 };
 
 // localStorage key + reader for the store config. Cached separately from the data cache so the
@@ -583,6 +663,8 @@ function effectiveStore(config = {}) {
     pcIp: pick(config.pcIp, STORE.pcIp),
     logo: pick(config.logo, ""),
     paymentQr: pick(config.paymentQr, ""),
+    upiId: pick(config.upiId, ""),
+    upiName: pick(config.upiName, ""),
   };
 }
 
@@ -1882,12 +1964,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
                   </div>
                 </div>
               )}
-              {pay === "UPI" && (
-                <div style={{ textAlign: "center", marginTop: 10, padding: 8, background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10 }}>
-                  <img src={store.paymentQr || PAYMENT_QR_SRC} alt="Scan to pay" style={{ width: 150, height: 150, objectFit: "contain" }} />
-                  <div style={{ fontSize: 11.5, fontWeight: 700, color: "#3A5547" }}>Scan to Pay · PhonePe / UPI</div>
-                </div>
-              )}
+              {pay === "UPI" && <UpiQrPreview store={store} amount={total} />}
               <button className="btn primary big" onClick={completeSale} style={{ marginTop: 12, width: "100%" }}>
                 Complete sale · {INR(total)} · {pay}
               </button>
@@ -5290,6 +5367,7 @@ function StoreConfig({ config, setConfig, notify, log }) {
   const toDraft = (c = {}) => ({
     name: c.name || "", tagline: c.tagline || "", address: c.address || "",
     phone: c.phone || "", pcIp: c.pcIp || "", logo: c.logo || "", paymentQr: c.paymentQr || "",
+    upiId: c.upiId || "", upiName: c.upiName || "",
   });
   const [draft, setDraft] = useState(() => toDraft(config));
   const [busyKey, setBusyKey] = useState(""); // "logo" | "paymentQr" while an upload is processed
@@ -5324,9 +5402,13 @@ function StoreConfig({ config, setConfig, notify, log }) {
     if (draft.pcIp.trim() && !isValidPcIp(draft.pcIp)) {
       return notify("⚠ Enter a valid IP like 192.168.1.50 (or 192.168.1.50:9100), or leave it blank");
     }
+    if (draft.upiId.trim() && !isValidUpiId(draft.upiId)) {
+      return notify("⚠ Enter a valid UPI ID like prakashmart@okhdfcbank, or leave it blank");
+    }
     const next = {
       name: draft.name.trim(), tagline: draft.tagline.trim(), address: draft.address.trim(),
       phone: draft.phone.trim(), pcIp: draft.pcIp.trim(), logo: draft.logo || "", paymentQr: draft.paymentQr || "",
+      upiId: draft.upiId.trim(), upiName: draft.upiName.trim(),
     };
     const snap = toDraft(next);
     savedRef.current = JSON.stringify(snap);
@@ -5408,7 +5490,20 @@ function StoreConfig({ config, setConfig, notify, log }) {
         <section style={S.panel}>
           <div style={S.panelHead}>Branding &amp; receipt</div>
           <ImageField label="Shop logo" keyName="logo" maxDim={240} fallback={LOGO_SRC} hint="shown in the sidebar, on the sign-in card and at the top of receipts" />
-          <ImageField label="Payment QR (receipt)" keyName="paymentQr" maxDim={480} fallback={PAYMENT_QR_SRC} hint="printed at the bottom of every receipt" />
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="UPI ID (amount QR)">
+              <input className="input" value={draft.upiId} placeholder="e.g. prakashmart@okhdfcbank" onChange={(e) => set("upiId", e.target.value)} />
+            </Field>
+            <Field label="Payee name (UPI)">
+              <input className="input" value={draft.upiName} placeholder={draft.name.trim() || STORE.name} onChange={(e) => set("upiName", e.target.value)} />
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A9C90", margin: "-2px 0 14px", lineHeight: 1.5 }}>
+            Set your UPI ID and the billing screen &amp; receipt show a QR that <b>already contains the bill amount</b> — the customer scans and pays without typing. Payee name is optional (defaults to the shop name). Leave the UPI ID blank to use the fixed image below instead.
+          </div>
+
+          <ImageField label="Payment QR image (fallback)" keyName="paymentQr" maxDim={480} fallback={PAYMENT_QR_SRC} hint="used on receipts only when no UPI ID is set" />
           <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 4, lineHeight: 1.5 }}>
             Images are automatically resized and stored with your shop data, so they sync to every signed-in device. Leave a field on “default” to keep the bundled image.
           </div>
