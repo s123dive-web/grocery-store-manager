@@ -3126,6 +3126,11 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
   const [to, setTo] = useState("");
   const [q, setQ] = useState(""); // free-text search across bills
   const [editing, setEditing] = useState(null); // { id, date, payment, lines:[...], orig:[...] }
+  // "Add item on the go" fields for the Edit-bill modal: catalogue search + quick-catalogue row.
+  const [addQ, setAddQ] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newCode, setNewCode] = useState("");
+  const [newPrice, setNewPrice] = useState("");
   const toggleDate = (d) => setOpenDates((s) => { const n = new Set(s); n.has(d) ? n.delete(d) : n.add(d); return n; });
 
   // Search matches a bill when EVERY space-separated term is found somewhere in it —
@@ -3176,6 +3181,77 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
   });
   const editLine = (idx, qty) => setEditing((e) => ({ ...e, lines: e.lines.map((l, i) => (i === idx ? { ...l, qty: Math.max(0, qty || 0) } : l)) }));
   const removeLine = (idx) => setEditing((e) => ({ ...e, lines: e.lines.filter((_, i) => i !== idx) }));
+
+  // ----- Add items to a bill while editing it -----
+  // Matches Billing's picker + Misc row so the two flows behave identically. Nothing here changes
+  // stock directly for existing items — saveEdit reconciles stock by name (orig vs new lines), so a
+  // line added here simply depletes that item's stock by its qty when the edit is saved.
+  const OPENING_STOCK = 20;     // opening stock for a quick-catalogued item (same as Billing)
+  const BUY_PRICE_RATIO = 0.8;  // default cost = 80% of sell price (≈20% margin)
+  const resetAddItem = () => { setAddQ(""); setNewName(""); setNewCode(""); setNewPrice(""); };
+  const closeEdit = () => { setEditing(null); resetAddItem(); };
+
+  // Catalogue items matching the add-search box (name / barcode / an exact price).
+  const addMatches = useMemo(() => {
+    const s = addQ.trim().toLowerCase();
+    if (!editing || !s) return [];
+    const isNum = /^\d+(\.\d+)?$/.test(s);
+    const num = isNum ? +s : null;
+    return items.filter((i) =>
+      i.name.toLowerCase().includes(s) ||
+      itemBarcodes(i).some((b) => b.toLowerCase().includes(s)) ||
+      (isNum && (+i.sellPrice === num || +i.mrp === num))
+    ).slice(0, 8);
+  }, [addQ, items, editing]);
+
+  // Add an existing catalogue item to the bill — bump the existing (non-misc) line of the same name
+  // if present, else append a fresh line. Prices are coerced to numbers because cloud/imported data
+  // can store them as strings (which would corrupt the amount/subtotal math).
+  const addExistingLine = (item) => {
+    setEditing((e) => {
+      if (!e) return e;
+      const key = normName(item.name);
+      const at = e.lines.findIndex((l) => !l.misc && normName(l.name) === key);
+      const price = +item.sellPrice || 0, buy = +item.buyPrice || 0;
+      const lines = at >= 0
+        ? e.lines.map((l, j) => (j === at ? { ...l, qty: (+l.qty || 0) + 1 } : l))
+        : [...e.lines, { name: item.name, qty: 1, unit: item.unit || "pc", price, buyPrice: buy, amount: money(price) }];
+      return { ...e, lines };
+    });
+    setAddQ("");
+  };
+
+  // Quick-catalogue a brand-new item and put it on the bill (mirrors Billing's Misc row): registers a
+  // real inventory item (opening stock 20, cost 80% of sell, auto category) so the catalogue grows,
+  // then adds a bill line whose qty is deducted from that stock on save. If the name/barcode already
+  // belongs to a catalogued item, that item is added instead — no duplicate is created.
+  const addNewItem = () => {
+    if (!editing) return;
+    const price = +newPrice;
+    if (!(price > 0)) return notify("Enter a price for the item.");
+    const name = newName.trim();
+    if (!name) return notify("Enter a name for the item.");
+    const codes = parseBarcodeText(newCode); // optional; cleaned + de-duped, first token = primary
+    const existing = (codes.length ? findItemByBarcode(items, codes[0]) : null)
+      || items.find((i) => normName(i.name) === normName(name));
+    if (existing) { addExistingLine(existing); resetAddItem(); return; }
+    const bcClash = findBarcodeClash(codes, items);
+    if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
+    const category = guessCategory(name, items) || "Other";
+    const sell = money(price);
+    const batches = [{ id: uid(), qty: OPENING_STOCK, expiry: "", addedOn: todayStr() }];
+    const newItem = {
+      name, code: codes[0] || "", barcodes: codes.slice(1), category, unit: "pc",
+      icon: iconFor(category), buyPrice: money(sell * BUY_PRICE_RATIO), sellPrice: sell, mrp: sell,
+      lowAt: 5, id: uid(), stock: OPENING_STOCK, batches, createdAt: todayStr(),
+    };
+    setItems((list) => [...list, newItem]);
+    setEditing((e) => (e ? { ...e, lines: [...e.lines, { name, qty: 1, unit: "pc", price: sell, buyPrice: newItem.buyPrice, amount: sell }] } : e));
+    log("inventory", `Added item “${name}” · ${OPENING_STOCK} pc @ ${INR(sell)} (cost ${INR(newItem.buyPrice)}) · ${category} (from bill edit${codes[0] ? `, barcode ${codes[0]}` : ""})`);
+    notify(`Added “${name}” to inventory (${category}, stock ${OPENING_STOCK}) & this bill`);
+    resetAddItem();
+  };
+
   const editSubtotal = editing ? money(editing.lines.reduce((a, l) => a + l.price * l.qty, 0)) : 0;
   const editDiscount = editing ? Math.min(editSubtotal, Math.max(0, money(+editing.discount || 0))) : 0;
   const editTotal = money(editSubtotal - editDiscount);
@@ -3213,6 +3289,7 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
     }));
     log("sale", `Edited bill → ${INR(total)} · ${newLines.length} line(s) · ${editing.payment}`);
     setEditing(null);
+    resetAddItem();
     notify("Bill updated");
   };
 
@@ -3419,7 +3496,7 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
       })}
 
       {editing && (
-        <Modal title="Edit bill" onClose={() => setEditing(null)}>
+        <Modal title="Edit bill" onClose={closeEdit}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Field label="Date"><input type="date" className="input" max={todayStr()} value={editing.date} onChange={(e) => setEditing({ ...editing, date: e.target.value })} /></Field>
             <Field label="Payment">
@@ -3441,6 +3518,49 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
               ))}
             </tbody>
           </table>
+
+          {/* Add items on the go — tap a catalogue match, or quick-catalogue a brand-new item. */}
+          <div style={{ marginTop: 4, marginBottom: 6, padding: "8px 10px", background: "#F4F7F4", borderRadius: 8 }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: "#465", marginBottom: 6 }}>Add item to this bill</div>
+            <input
+              className="input"
+              placeholder="Search catalogue — name / barcode / price…"
+              value={addQ}
+              onChange={(e) => setAddQ(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && addMatches.length > 0) { addExistingLine(addMatches[0]); } }}
+              aria-label="Search catalogue to add an item"
+            />
+            {addMatches.length > 0 && (
+              <div style={{ marginTop: 6, maxHeight: 176, overflowY: "auto", border: "1px solid #E3EAE3", borderRadius: 8, background: "#fff" }}>
+                {addMatches.map((i) => {
+                  const inStock = (+i.stock || 0) > 0;
+                  return (
+                    <div key={i.id} role="button" onClick={() => addExistingLine(i)}
+                      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 10px", cursor: "pointer", borderBottom: "1px solid #F0F3F0" }}>
+                      <span style={{ fontSize: 13 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}</span>
+                      <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                        <span style={{ color: "#1B5E43", fontWeight: 700 }}>{INR(i.sellPrice)}</span>
+                        <span style={{ marginLeft: 8, color: inStock ? "#789" : "#C44536", fontWeight: inStock ? 400 : 600 }}>{inStock ? `${+i.stock || 0} left` : "Out of stock"}</span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {addQ.trim() && addMatches.length === 0 && (
+              <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 6 }}>No catalogue match — add it as a new item below.</div>
+            )}
+            {/* Quick-catalogue a new item (mirrors Billing's Misc row): creates a real inventory item. */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginTop: 8 }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: "#465", whiteSpace: "nowrap" }}>🧾 New</span>
+              <input className="input" style={{ flex: 1, minWidth: 90 }} placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addNewItem(); }} aria-label="New item name" />
+              <input className="input" style={{ flex: 1, minWidth: 100 }} placeholder="Barcode (optional)" value={newCode} onChange={(e) => setNewCode(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addNewItem(); }} aria-label="New item barcode (optional)" title="Barcode (optional) — scan or type so this item scans at billing next time" />
+              <input className="input" style={{ width: 86 }} type="number" min="0" step="0.01" placeholder="₹ sell" value={newPrice} onChange={(e) => setNewPrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addNewItem(); }} aria-label="New item sell price" />
+              <button className="btn" onClick={addNewItem}>+ Add</button>
+            </div>
+            <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 6 }}>New items are catalogued (opening stock {OPENING_STOCK}); the quantity on this bill is deducted from stock when you save.</div>
+          </div>
+
           <Field label="Additional discount (₹)">
             <input className="input" type="number" min="0" step="0.01" max={editSubtotal} placeholder="0" value={editing.discount} onChange={(e) => setEditing({ ...editing, discount: e.target.value })} />
           </Field>
