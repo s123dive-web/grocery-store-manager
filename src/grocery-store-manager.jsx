@@ -4596,31 +4596,79 @@ function Udhari({ sales, setSales, notify, log }) {
   const toggle = (name) => setOpenCust((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; });
   const toggleBill = (id) => setOpenBills((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
-  const openPay = (sale) => { setPaying(sale); setPayAmt(String(billOut(sale))); setPayMode(sale.paidMode || "Cash"); };
+  // A repayment targets EITHER one bill ({type:"bill", id}) or a customer's whole balance
+  // ({type:"customer", name}). Customer payments are split across their due bills.
+  const openPay = (sale) => { setPaying({ type: "bill", id: sale.id }); setPayAmt(String(billOut(sale))); setPayMode(sale.paidMode || "Cash"); };
+  // Pay against a customer's WHOLE outstanding — the lump sum is applied to their due bills
+  // oldest-first (FIFO), so it settles the longest-standing debts before the newer ones.
+  const openPayCustomer = (c) => { setPaying({ type: "customer", name: c.name }); setPayAmt(String(c.outstanding)); setPayMode("Cash"); };
 
-  // Current outstanding/figures for the bill being paid are read live from `sales`, so the
-  // modal stays correct even if the underlying record changed (e.g. edited elsewhere).
-  const payingLive = paying ? sales.find((s) => s.id === paying.id) : null;
-  const payOut = payingLive ? billOut(payingLive) : 0;
+  // Split a lump sum across bills (already oldest-first), returning [{bill, amount}] per bill touched.
+  const allocateFIFO = (bills, amount) => {
+    let remaining = money(amount);
+    const parts = [];
+    for (const b of bills) {
+      if (remaining <= 0.005) break;
+      const a = Math.min(billOut(b), remaining);
+      if (a > 0.005) { parts.push({ bill: b, amount: money(a) }); remaining = money(remaining - a); }
+    }
+    return parts;
+  };
+
+  // Figures for whatever is being paid, read live from `sales` so the modal stays correct
+  // even if the underlying records changed (e.g. edited elsewhere while it's open).
+  const payingBill = paying?.type === "bill" ? sales.find((s) => s.id === paying.id) : null;
+  // The customer's still-due bills, oldest-first for FIFO allocation.
+  const payingCustBills = paying?.type === "customer"
+    ? sales.filter((s) => s.payment === "Udhari" && ((((s.customer || "").trim() || "(no name)") === paying.name)) && billOut(s) > 0).sort((a, b) => byDateTimeDesc(b, a))
+    : null;
+  const payOut = paying?.type === "bill"
+    ? (payingBill ? billOut(payingBill) : 0)
+    : (paying?.type === "customer" ? money((payingCustBills || []).reduce((a, s) => a + billOut(s), 0)) : 0);
+  const payWho = paying?.type === "bill" ? ((payingBill?.customer || "").trim() || "(no name)") : (paying?.name || "");
   const payAmtNum = Math.min(payOut, Math.max(0, money(+payAmt || 0)));
   const payRemaining = money(payOut - payAmtNum);
+  // How a customer lump sum lands across their bills — preview and save use the same split.
+  const payAlloc = paying?.type === "customer" ? allocateFIFO(payingCustBills || [], payAmtNum) : null;
+  const payClears = payAlloc ? payAlloc.filter((p) => p.amount >= billOut(p.bill) - 0.005).length : 0;
+  // Something concrete to pay against (a live bill, or a customer with ≥1 due bill).
+  const payShow = !!paying && !!(payingBill || (payingCustBills && payingCustBills.length));
 
   const savePayment = () => {
-    if (!payingLive) return setPaying(null);
+    if (!paying) return setPaying(null);
     if (payAmtNum <= 0) return notify("Enter an amount greater than ₹0");
-    const newPaid = money((payingLive.paid || 0) + payAmtNum);
-    const rem = money((payingLive.total || 0) - newPaid);
-    // Single setSales → Sales History, dashboard and cloud sync all pick up the new paid/outstanding.
-    // Also append a dated entry to the payments ledger so the History panel can show when it was paid.
     const nowTime = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
-    setSales((all) => all.map((x) => {
-      if (x.id !== payingLive.id) return x;
-      const payments = [...(x.payments || []), { id: uid(), date: todayStr(), time: nowTime, amount: payAmtNum, mode: payMode }];
-      return { ...x, paid: newPaid, paidMode: payMode, payments };
-    }));
-    const who = (payingLive.customer || "").trim() || "(no name)";
-    log("sale", `Udhari repayment ${INR(payAmtNum)} (${payMode}) from ${who}${rem > 0 ? ` — ${INR(rem)} still due` : " — bill cleared"}`);
-    notify(`Recorded ${INR(payAmtNum)} (${payMode})${rem > 0 ? ` · ${INR(rem)} still due` : " · bill cleared 🎉"}`);
+    if (paying.type === "bill") {
+      if (!payingBill) return setPaying(null);
+      const newPaid = money((payingBill.paid || 0) + payAmtNum);
+      const rem = money((payingBill.total || 0) - newPaid);
+      // Single setSales → Sales History, dashboard and cloud sync all pick up the new paid/outstanding.
+      // Also append a dated entry to the payments ledger so the History panel can show when it was paid.
+      setSales((all) => all.map((x) => {
+        if (x.id !== payingBill.id) return x;
+        const payments = [...(x.payments || []), { id: uid(), date: todayStr(), time: nowTime, amount: payAmtNum, mode: payMode }];
+        return { ...x, paid: newPaid, paidMode: payMode, payments };
+      }));
+      log("sale", `Udhari repayment ${INR(payAmtNum)} (${payMode}) from ${payWho}${rem > 0 ? ` — ${INR(rem)} still due` : " — bill cleared"}`);
+      notify(`Recorded ${INR(payAmtNum)} (${payMode})${rem > 0 ? ` · ${INR(rem)} still due` : " · bill cleared 🎉"}`);
+    } else {
+      // Customer-level: apply the lump sum across their due bills oldest-first, stamping a dated
+      // ledger entry on each bill it touches. One setSales updates every affected bill at once.
+      const alloc = payAlloc || [];
+      if (!alloc.length) return setPaying(null);
+      const byId = {};
+      alloc.forEach((p) => { byId[p.bill.id] = p.amount; });
+      setSales((all) => all.map((x) => {
+        const amt = byId[x.id];
+        if (amt == null) return x;
+        const payments = [...(x.payments || []), { id: uid(), date: todayStr(), time: nowTime, amount: amt, mode: payMode }];
+        return { ...x, paid: money((x.paid || 0) + amt), paidMode: payMode, payments };
+      }));
+      const rem = money(payOut - payAmtNum);
+      const nb = alloc.length;
+      log("sale", `Udhari repayment ${INR(payAmtNum)} (${payMode}) from ${payWho} across ${nb} bill${nb === 1 ? "" : "s"}${rem > 0 ? ` — ${INR(rem)} still due` : " — all cleared"}`);
+      notify(`Recorded ${INR(payAmtNum)} (${payMode}) across ${nb} bill${nb === 1 ? "" : "s"}${rem > 0 ? ` · ${INR(rem)} still due` : " · all cleared 🎉"}`);
+    }
     setPaying(null);
   };
 
@@ -4643,8 +4691,9 @@ function Udhari({ sales, setSales, notify, log }) {
               {udhari.withDue.map((c) => {
                 const isOpen = openCust.has(c.name);
                 const dueBills = c.billList.filter((b) => billOut(b) > 0);
-                // Record from the customer row: one bill → pay it straight away; several → expand to choose.
-                const recordRow = () => (dueBills.length === 1 ? openPay(dueBills[0]) : toggle(c.name));
+                // One bill → pay it directly; several → pay the whole balance in one go (split
+                // oldest-first). Either way the row itself still expands to pay a single bill.
+                const payRow = () => (dueBills.length === 1 ? openPay(dueBills[0]) : openPayCustomer(c));
                 return (
                   <Fragment key={c.name}>
                     <tr onClick={() => toggle(c.name)} style={{ cursor: "pointer" }}>
@@ -4654,8 +4703,8 @@ function Udhari({ sales, setSales, notify, log }) {
                       <td style={{ textAlign: "right" }}>{c.bills}</td>
                       <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(c.outstanding)}</td>
                       <td style={{ textAlign: "right" }}>
-                        <button className="btn small primary" onClick={(e) => { e.stopPropagation(); recordRow(); }}>
-                          {dueBills.length === 1 ? "Pay" : "Pay ▸"}
+                        <button className="btn small primary" onClick={(e) => { e.stopPropagation(); payRow(); }}>
+                          {dueBills.length === 1 ? "Pay" : "Pay total"}
                         </button>
                       </td>
                     </tr>
@@ -4703,7 +4752,7 @@ function Udhari({ sales, setSales, notify, log }) {
             </tbody>
           </table>
         )}
-        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Tap a customer to see their bills, then Pay a full or part repayment (Cash / UPI). Sales History updates automatically.</div>
+        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>“Pay total” settles a customer's whole balance in one go (oldest bills first). Or tap a customer to expand and pay a single bill — full or part, Cash / UPI. Sales History updates automatically.</div>
       </section>
 
       <section style={{ ...S.panel, marginTop: 16 }}>
@@ -4739,16 +4788,24 @@ function Udhari({ sales, setSales, notify, log }) {
         {history.events.length > 150 && <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>Showing the most recent 150 of {history.events.length} events.</div>}
       </section>
 
-      {paying && payingLive && (
+      {payShow && (
         // Close only when the press STARTS on the backdrop itself. Using onClick here would
         // also fire when a drag/tap that began inside the input releases over the backdrop,
         // closing the modal mid-payment.
         <div style={S.overlay} onMouseDown={(e) => { if (e.target === e.currentTarget) setPaying(null); }}>
           <div style={S.modal}>
-            <h2 style={{ fontSize: 17, margin: "0 0 4px" }}>Pay</h2>
+            <h2 style={{ fontSize: 17, margin: "0 0 4px" }}>{paying.type === "customer" ? "Pay total" : "Pay"}</h2>
             <div style={{ fontSize: 13, color: "#566", marginBottom: 14 }}>
-              <b>{(payingLive.customer || "").trim() || "(no name)"}</b> · {payingLive.date} · bill {INR(payingLive.total)}
-              {(payingLive.paid || 0) > 0 ? ` · already paid ${INR(payingLive.paid)}` : ""} · <span style={{ color: "#C44536", fontWeight: 600 }}>outstanding {INR(payOut)}</span>
+              {paying.type === "customer" ? (
+                <>
+                  <b>{payWho}</b> · {payingCustBills.length} unpaid bill{payingCustBills.length === 1 ? "" : "s"} · <span style={{ color: "#C44536", fontWeight: 600 }}>outstanding {INR(payOut)}</span>
+                </>
+              ) : (
+                <>
+                  <b>{payWho}</b> · {payingBill.date} · bill {INR(payingBill.total)}
+                  {(payingBill.paid || 0) > 0 ? ` · already paid ${INR(payingBill.paid)}` : ""} · <span style={{ color: "#C44536", fontWeight: 600 }}>outstanding {INR(payOut)}</span>
+                </>
+              )}
             </div>
             <Field label="Amount received">
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -4762,12 +4819,17 @@ function Udhari({ sales, setSales, notify, log }) {
                 <button key={m} className={"btn small " + (payMode === m ? "primary" : "ghost")} onClick={() => setPayMode(m)}>{m}</button>
               ))}
             </div>
-            <div style={{ fontSize: 13, textAlign: "right", marginBottom: 14, fontWeight: 600 }}>
+            <div style={{ fontSize: 13, textAlign: "right", marginBottom: paying.type === "customer" && payAmtNum > 0 ? 4 : 14, fontWeight: 600 }}>
               Paying {INR(payAmtNum)} ({payMode})
               {payRemaining > 0
                 ? <span style={{ color: "#C44536" }}> · remaining {INR(payRemaining)}</span>
-                : <span style={{ color: "#1B5E43" }}> · clears this bill 🎉</span>}
+                : <span style={{ color: "#1B5E43" }}> · {paying.type === "customer" ? "clears all bills 🎉" : "clears this bill 🎉"}</span>}
             </div>
+            {paying.type === "customer" && payAmtNum > 0 && (
+              <div style={{ fontSize: 11.5, color: "#8A9C90", textAlign: "right", marginBottom: 14 }}>
+                Applied oldest bills first{payClears > 0 ? ` · clears ${payClears} bill${payClears === 1 ? "" : "s"}` : ""}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button className="btn ghost" onClick={() => setPaying(null)}>Cancel</button>
               <button className="btn primary" onClick={savePayment} disabled={payAmtNum <= 0}>Pay</button>
