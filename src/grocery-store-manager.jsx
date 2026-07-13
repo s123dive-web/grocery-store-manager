@@ -3447,7 +3447,10 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
             {new Date(date + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
             {isToday && <span style={{ fontWeight: 600, color: "#1B5E43", marginLeft: 8 }}>· Today</span>}
             <span style={{ fontWeight: 500, color: "#8A9C90", marginLeft: 8 }}>· {list.length} bill{list.length > 1 ? "s" : ""}</span>
-            <span style={{ marginLeft: "auto", fontWeight: 800 }}>{INR(list.reduce((a, s) => a + s.total, 0))}</span>
+            <span style={{ marginLeft: "auto", fontWeight: 800 }}>
+              {INR(list.reduce((a, s) => a + s.total, 0))}
+              <span style={{ color: "#1B5E43", fontWeight: 700, fontSize: 12.5, marginLeft: 6 }}>(+{INR(money(list.reduce((a, s) => a + (s.profit || 0), 0)))})</span>
+            </span>
           </div>
           {expanded && list.map((s) => (
             <div key={s.id}>
