@@ -1407,7 +1407,7 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
             <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
             <Tooltip formatter={(v) => INR(v)} />
-            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
           </BarChart>
         </ChartCard>
         <ChartCard title="Day wise profit" height={220}>
@@ -1416,7 +1416,7 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
             <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
             <Tooltip formatter={(v) => INR(v)} />
-            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
           </BarChart>
         </ChartCard>
       </div>
@@ -1428,8 +1428,8 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
             <Tooltip formatter={(v) => INR(v)} />
             <Legend wrapperStyle={{ fontSize: 12 }} />
-            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
-            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
           </BarChart>
         </ChartCard>
       </div>
@@ -1463,8 +1463,8 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
             <Tooltip formatter={(v) => INR(v)} labelFormatter={(l) => "Week of " + l} />
             <Legend wrapperStyle={{ fontSize: 12 }} />
-            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} />
-            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+            <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} label={barLabel} />
           </BarChart>
         </ChartCard>
       </div>
