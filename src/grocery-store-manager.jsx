@@ -1337,63 +1337,14 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
 
       <div style={{ marginTop: 16 }}>
         <ChartCard title="Sales — last 14 days" height={200}>
-          <AreaChart data={trend} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
-            <defs>
-              <linearGradient id="gDash" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1B5E43" stopOpacity={0.35} /><stop offset="100%" stopColor="#1B5E43" stopOpacity={0.03} /></linearGradient>
-            </defs>
+          <BarChart data={trend} margin={{ top: 16, right: 8, left: -8, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#EEF3EE" />
-            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval="preserveStartEnd" minTickGap={16} />
+            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#678" }} interval={0} minTickGap={0} />
             <YAxis tick={{ fontSize: 11, fill: "#678" }} tickFormatter={inrTick} width={48} />
             <Tooltip formatter={(v) => INR(v)} />
-            <Area type="monotone" dataKey="revenue" name="Revenue" stroke="#1B5E43" strokeWidth={2} fill="url(#gDash)" />
-          </AreaChart>
+            <Bar dataKey="revenue" name="Revenue" fill="#1B5E43" radius={[3, 3, 0, 0]} label={barLabel} />
+          </BarChart>
         </ChartCard>
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <ChartCard title={`Payments in ${monthName} — Total vs Cash vs UPI`} height={200}>
-          {renderPayMix(monthSales)}
-        </ChartCard>
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <ChartCard title="Total vs Cash vs UPI — last 14 days" height={200}>
-          {renderPayTrend(trend)}
-        </ChartCard>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-        <section style={S.panel}>
-          <div style={S.panelHead}>
-            Low stock — reorder soon
-            {lowStock.length > 0 && <span style={{ ...S.badge, position: "static", marginLeft: 8 }}>{lowStock.length}</span>}
-          </div>
-          {lowStock.length === 0 ? (
-            <Empty text="All items are well stocked." />
-          ) : (
-            lowStock.slice(0, 8).map((i) => (
-              <div key={i.id} style={S.row}>
-                <span>{i.name}</span>
-                <span style={{ color: "#C44536", fontWeight: 700 }}>{i.stock} {i.unit} left</span>
-              </div>
-            ))
-          )}
-        </section>
-        <section style={S.panel}>
-          <div style={S.panelHead}>{isToday ? "Recent bills" : "Bills on this day"}</div>
-          {daySales.length === 0 ? (
-            <Empty text={isToday ? "No bills yet today." : "No bills on this day."}>
-              {isToday && <button className="btn primary" onClick={goBilling}>Start billing</button>}
-            </Empty>
-          ) : (
-            [...daySales].reverse().slice(0, 8).map((s) => (
-              <div key={s.id} style={S.row}>
-                <span>{s.time} · {s.lines.length} items</span>
-                <b>{INR(s.total)}</b>
-              </div>
-            ))
-          )}
-        </section>
       </div>
 
       <div style={{ fontSize: 13, fontWeight: 800, color: "#10331F", letterSpacing: ".02em", margin: "22px 0 8px" }}>
@@ -1516,6 +1467,52 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             <Bar dataKey="profit" name="Profit" fill="#E8A33D" radius={[3, 3, 0, 0]} />
           </BarChart>
         </ChartCard>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title={`Payments in ${monthName} — Total vs Cash vs UPI`} height={200}>
+          {renderPayMix(monthSales)}
+        </ChartCard>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <ChartCard title="Total vs Cash vs UPI — last 14 days" height={200}>
+          {renderPayTrend(trend)}
+        </ChartCard>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
+        <section style={S.panel}>
+          <div style={S.panelHead}>
+            Low stock — reorder soon
+            {lowStock.length > 0 && <span style={{ ...S.badge, position: "static", marginLeft: 8 }}>{lowStock.length}</span>}
+          </div>
+          {lowStock.length === 0 ? (
+            <Empty text="All items are well stocked." />
+          ) : (
+            lowStock.slice(0, 8).map((i) => (
+              <div key={i.id} style={S.row}>
+                <span>{i.name}</span>
+                <span style={{ color: "#C44536", fontWeight: 700 }}>{i.stock} {i.unit} left</span>
+              </div>
+            ))
+          )}
+        </section>
+        <section style={S.panel}>
+          <div style={S.panelHead}>{isToday ? "Recent bills" : "Bills on this day"}</div>
+          {daySales.length === 0 ? (
+            <Empty text={isToday ? "No bills yet today." : "No bills on this day."}>
+              {isToday && <button className="btn primary" onClick={goBilling}>Start billing</button>}
+            </Empty>
+          ) : (
+            [...daySales].reverse().slice(0, 8).map((s) => (
+              <div key={s.id} style={S.row}>
+                <span>{s.time} · {s.lines.length} items</span>
+                <b>{INR(s.total)}</b>
+              </div>
+            ))
+          )}
+        </section>
       </div>
     </div>
   );
