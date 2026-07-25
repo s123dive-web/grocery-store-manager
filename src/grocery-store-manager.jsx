@@ -753,6 +753,20 @@ function removeStock(item, qty, date) {
   return { ...item, batches: out, stock: Math.max(0, (item.stock || 0) - (+qty || 0)), updatedAt: date || todayStr() };
 }
 
+// Sum of an item's recorded batch quantities — the true count of stock that entered via
+// addBatch. Trustworthy even when `stock` is corrupt: batch qtys are stored as real numbers
+// (numify on load) and never concatenate.
+const batchQtySum = (i) => (Array.isArray(i.batches) ? i.batches.reduce((a, b) => a + (+b.qty || 0), 0) : 0);
+
+// Detects an item whose `stock` ballooned from the old string-concatenation bug in addBatch
+// ("5" + 5 → "55", snowballing over restocks) — the cause of a wildly overstated Stock value.
+// Corruption can only happen via addBatch, which always leaves a batch, so batchQtySum is the
+// true recorded count. Flag only when stock is BOTH implausibly large in absolute terms (no
+// single grocery SKU realistically exceeds this ceiling) AND far above the batch sum — the
+// ratio guard spares legitimately high stocks that match their batches.
+const STOCK_SANE_CEIL = 5000;
+const isInflatedStock = (i) => { const s = +i?.stock || 0; const bs = batchQtySum(i); return bs > 0 && s > STOCK_SANE_CEIL && s >= bs * 3; };
+
 // Days until the earliest batch expiry (null if no dated batches; negative = expired).
 function daysToExpiry(item) {
   const dates = (item.batches || []).filter((b) => b.expiry).map((b) => b.expiry).sort();
@@ -5735,6 +5749,7 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
   const isOtherCat = (i) => { const c = (i.category || "").trim().toLowerCase(); return c === "" || c === "other"; };
   const guessForOther = (i) => { const g = guessCategory(i.name); return g && g !== "Other" ? g : null; };
   const otherFixable = useMemo(() => items.filter((i) => isOtherCat(i) && guessForOther(i)).length, [items]);
+  const inflatedCount = useMemo(() => items.filter((i) => isInflatedStock(i)).length, [items]);
 
   const ops = [
     { key: "zeroStock", label: "Zero all stock", group: "Inventory",
@@ -5772,6 +5787,11 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
         return { ...i, category: g, icon: isAutoIcon(i.icon, i.category) ? iconFor(g) : i.icon, updatedAt: todayStr() };
       })),
       logMsg: `Auto-categorized ${otherFixable} item(s) from Other`, toast: `${otherFixable} item(s) re-categorized` },
+    { key: "fixInflatedStock", label: "Fix inflated stock" + (inflatedCount ? ` (${inflatedCount})` : ""), group: "Inventory",
+      desc: "Repair items whose stock ballooned to a nonsense figure from a past string-concatenation bug — the cause of a wildly overstated Stock value. Resets each affected item's stock to the total of its recorded batches (its true count). Prices and batches are kept; re-check the count in the item editor afterwards if needed.",
+      disabled: inflatedCount === 0,
+      apply: () => setItems((l) => l.map((i) => (isInflatedStock(i) ? { ...i, stock: batchQtySum(i), updatedAt: todayStr() } : i))),
+      logMsg: `Fixed inflated stock on ${inflatedCount} item(s)`, toast: `Fixed inflated stock on ${inflatedCount} item(s)` },
     { key: "delZeroStock", label: "Delete 0-stock items" + (zeroStockCount ? ` (${zeroStockCount})` : ""), group: "Danger zone", danger: true,
       desc: "Permanently remove every item whose stock is 0. Items that still have stock are kept.",
       disabled: zeroStockCount === 0,
