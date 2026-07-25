@@ -767,6 +767,27 @@ const batchQtySum = (i) => (Array.isArray(i.batches) ? i.batches.reduce((a, b) =
 const STOCK_SANE_CEIL = 5000;
 const isInflatedStock = (i) => { const s = +i?.stock || 0; const bs = batchQtySum(i); return bs > 0 && s > STOCK_SANE_CEIL && s >= bs * 3; };
 
+// Month tokens (full names + 3-letter abbreviations) for spotting period-label pseudo-items.
+const MONTH_TOKENS = new Set([
+  "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+  "january", "february", "march", "april", "june", "july", "august", "september", "october", "november", "december",
+]);
+
+// A "ledger" pseudo-item: a period label or a money note typed into inventory (e.g. "APR / MAY",
+// "JUNE", "Pending Money") that isn't sellable stock yet inflates Stock value. Matched
+// CONSERVATIVELY so it can never hit a real product — always by WHOLE name, never a substring:
+//   • every alphabetic word in the name is a month (with ≥1 month present) — so "APR / MAY",
+//     "JUNE", "Jan 2026" match, but "Marie", "Mayonnaise", "Novino", "Apricot" (which merely
+//     CONTAIN a month-like substring) do NOT; or
+//   • the name's first word is "pending" ("Pending", "Pending Money").
+const isLedgerEntry = (i) => {
+  const words = String(i?.name || "").trim().toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  if (!words.length) return false;
+  if (words[0] === "pending") return true;
+  const months = words.filter((w) => MONTH_TOKENS.has(w));
+  return months.length > 0 && months.length === words.length;
+};
+
 // Days until the earliest batch expiry (null if no dated batches; negative = expired).
 function daysToExpiry(item) {
   const dates = (item.batches || []).filter((b) => b.expiry).map((b) => b.expiry).sort();
@@ -5750,6 +5771,7 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
   const guessForOther = (i) => { const g = guessCategory(i.name); return g && g !== "Other" ? g : null; };
   const otherFixable = useMemo(() => items.filter((i) => isOtherCat(i) && guessForOther(i)).length, [items]);
   const inflatedCount = useMemo(() => items.filter((i) => isInflatedStock(i)).length, [items]);
+  const ledgerEntries = useMemo(() => items.filter((i) => isLedgerEntry(i)), [items]);
 
   const ops = [
     { key: "zeroStock", label: "Zero all stock", group: "Inventory",
@@ -5792,6 +5814,13 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
       disabled: inflatedCount === 0,
       apply: () => setItems((l) => l.map((i) => (isInflatedStock(i) ? { ...i, stock: batchQtySum(i), updatedAt: todayStr() } : i))),
       logMsg: `Fixed inflated stock on ${inflatedCount} item(s)`, toast: `Fixed inflated stock on ${inflatedCount} item(s)` },
+    { key: "delLedger", label: "Remove ledger / non-product entries" + (ledgerEntries.length ? ` (${ledgerEntries.length})` : ""), group: "Danger zone", danger: true,
+      desc: "Delete pseudo-items that are really period labels or money notes (e.g. “APR / MAY”, “JUNE”, “Pending Money”) — not sellable stock, but they inflate Stock value. Only entries whose whole name is a month/period, or that begin with “Pending”, are removed; real products and Misc buckets are never touched. Review the exact list on the next screen before confirming.",
+      disabled: ledgerEntries.length === 0,
+      preview: ledgerEntries.map((i) => i.name),
+      apply: () => setItems((l) => l.filter((i) => !isLedgerEntry(i))),
+      logMsg: `Removed ${ledgerEntries.length} ledger/non-product entr${ledgerEntries.length === 1 ? "y" : "ies"}`,
+      toast: `Removed ${ledgerEntries.length} non-product entr${ledgerEntries.length === 1 ? "y" : "ies"}` },
     { key: "delZeroStock", label: "Delete 0-stock items" + (zeroStockCount ? ` (${zeroStockCount})` : ""), group: "Danger zone", danger: true,
       desc: "Permanently remove every item whose stock is 0. Items that still have stock are kept.",
       disabled: zeroStockCount === 0,
@@ -5877,6 +5906,12 @@ function Admin({ items, setItems, setSales, setExpenses, setLogs, user, notify, 
             <>
               <p style={{ marginTop: 0, fontWeight: 700, color: pending.danger ? "#B23B2E" : "#10331F" }}>{pending.label}</p>
               <p style={{ color: "#5E7468", fontSize: 13 }}>{pending.desc}</p>
+              {pending.preview?.length ? (
+                <div style={{ maxHeight: 168, overflowY: "auto", border: "1px solid #EAF0EA", borderRadius: 8, padding: "8px 10px", margin: "0 0 10px", fontSize: 12.5, color: "#3B4A42", background: "#F7FAF7" }}>
+                  <div style={{ fontWeight: 700, color: "#5E7468", marginBottom: 4 }}>{pending.preview.length} item(s) to be removed:</div>
+                  {pending.preview.map((n, idx) => (<div key={idx} style={{ padding: "1px 0" }}>• {n || <i>(no name)</i>}</div>))}
+                </div>
+              ) : null}
               <p style={{ color: pending.danger ? "#B23B2E" : "#5E7468", fontSize: 13 }}>
                 This applies to all signed-in devices and may not be reversible. Continue?
               </p>
