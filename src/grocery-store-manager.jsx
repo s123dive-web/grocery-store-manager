@@ -42,6 +42,22 @@ const money = (n) => {
   const v = Number(n);
   return Number.isFinite(v) ? Math.round((v + Number.EPSILON) * 100) / 100 : 0;
 };
+// Quantities can be fractional for weighed goods (e.g. 0.25 kg = 250 g). Round to 3 decimals
+// (1-gram precision) so repeated add/deplete never drift, mirroring how `money` guards rupees.
+const round3 = (n) => {
+  const v = Number(n);
+  return Number.isFinite(v) ? Math.round((v + Number.EPSILON) * 1000) / 1000 : 0;
+};
+// Items sold by weight get gram-level part selection in billing and fractional stock everywhere.
+const isWeighed = (unit) => unit === "kg";
+// Human display of a quantity with its unit: weighed goods read as grams under 1 kg ("250 g") and
+// kg at/above 1 kg ("1.5 kg"); everything else is its plain count ("3 pc"). round3 first so the
+// number prints cleanly (no 0.1+0.2 tails, no trailing zeros).
+const fmtQty = (qty, unit) => {
+  const q = round3(qty);
+  if (unit === "kg") return q > 0 && q < 1 ? `${Math.round(q * 1000)} g` : `${q} kg`;
+  return `${q} ${unit || ""}`.trim();
+};
 // Local calendar date as YYYY-MM-DD. MUST be local, not toISOString() (which is UTC)
 // — otherwise early-morning sales in IST get filed under the previous day.
 const dateStr = (d) =>
@@ -165,7 +181,7 @@ function printReceipt(sale, store = STORE) {
         !l.misc && l.price != null && l.price !== ""
           ? `<span class="sub">@ ${INR(l.price)}${unit}</span>`
           : "";
-      return `<tr><td class="col-name"><span class="nm">${escapeHtml(l.name)}</span>${sub}</td><td class="col-qty">${escapeHtml(String(l.qty))}</td><td class="col-amt">${INR(l.amount)}</td></tr>`;
+      return `<tr><td class="col-name"><span class="nm">${escapeHtml(l.name)}</span>${sub}</td><td class="col-qty">${escapeHtml(fmtQty(l.qty, l.unit))}</td><td class="col-amt">${INR(l.amount)}</td></tr>`;
     })
     .join("");
   printHtml(
@@ -736,7 +752,7 @@ function addBatch(item, qty, expiry, date) {
   // (+item.stock || 0), NOT (item.stock || 0): if stock is a STRING (legacy/imported/cloud
   // data), a bare `+` concatenates ("5" + 5 → "55") and snowballs a stock into a nonsense
   // multi-billion figure over repeated restocks/scans. Coerce to a real number first.
-  return { ...item, batches, stock: (+item.stock || 0) + q, updatedAt: date || todayStr() };
+  return { ...item, batches, stock: round3((+item.stock || 0) + q), updatedAt: date || todayStr() };
 }
 
 function removeStock(item, qty, date) {
@@ -745,12 +761,12 @@ function removeStock(item, qty, date) {
   [...(item.batches || [])].sort(batchSort).forEach((b) => {
     if (need <= 0) return out.push(b);
     if (b.qty <= need) { need -= b.qty; } // consume whole batch
-    else { out.push({ ...b, qty: b.qty - need }); need = 0; }
+    else { out.push({ ...b, qty: round3(b.qty - need) }); need = 0; }
   });
   // `stock` is the authoritative count; batches track only the dated portion (addBatch can
   // raise stock without a matching batch), so decrement stock directly rather than from the
   // batch sum — otherwise legacy stock that predates any batch would be lost on a sale.
-  return { ...item, batches: out, stock: Math.max(0, (item.stock || 0) - (+qty || 0)), updatedAt: date || todayStr() };
+  return { ...item, batches: out, stock: Math.max(0, round3((item.stock || 0) - (+qty || 0))), updatedAt: date || todayStr() };
 }
 
 // Sum of an item's recorded batch quantities — the true count of stock that entered via
@@ -1528,7 +1544,7 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
             lowStock.slice(0, 8).map((i) => (
               <div key={i.id} style={S.row}>
                 <span>{i.name}</span>
-                <span style={{ color: "#C44536", fontWeight: 700 }}>{i.stock} {i.unit} left</span>
+                <span style={{ color: "#C44536", fontWeight: 700 }}>{fmtQty(i.stock, i.unit)} left</span>
               </div>
             ))
           )}
@@ -1572,6 +1588,8 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
   const miscNameRef = useRef(null);             // focused when the "not found" modal hands a scan over
   const [stockFor, setStockFor] = useState(null); // item id whose quick "add stock" box is open
   const [stockQty, setStockQty] = useState("");
+  const [weighFor, setWeighFor] = useState(null); // kg item id whose weight-picker is open
+  const [weighG, setWeighG] = useState("");        // custom grams typed in that picker
   const [custFocus, setCustFocus] = useState(false); // customer-name field focused → show suggestions
   const [notFound, setNotFound] = useState(null); // a scanned barcode that matched no product → modal
   const searchRef = useRef(null);
@@ -1651,20 +1669,34 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
     return [...[...inStock].sort(byActivity).slice(0, 12), ...out.slice(0, 8)];
   }, [q, items, soldQty, lastSold]);
 
-  // Put an item on the bill (or bump its qty if already there). Functional update so rapid
-  // clicks / scanner input never read a stale cart.
-  const pushToCart = (item) => setCart((cart) => {
+  // Put an item on the bill (or bump its qty by addQty — 1 for counted goods, a fractional kg for
+  // weighed ones). Functional update so rapid clicks / scanner input never read a stale cart.
+  const pushToCart = (item, addQty = 1) => setCart((cart) => {
     const ex = cart.find((c) => c.id === item.id);
     return ex
-      ? cart.map((c) => (c.id === item.id ? { ...c, qty: c.qty + 1 } : c))
-      : [...cart, { id: item.id, name: item.name, icon: item.icon, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: 1 }];
+      ? cart.map((c) => (c.id === item.id ? { ...c, qty: round3(c.qty + addQty) } : c))
+      : [...cart, { id: item.id, name: item.name, icon: item.icon, unit: item.unit, sellPrice: item.sellPrice, buyPrice: item.buyPrice, qty: round3(addQty) }];
   });
 
   const add = (item) => {
     if (item.stock <= 0) return notify("Out of stock: " + item.name);
+    // Weighed goods (kg): open the gram picker instead of adding a whole unit.
+    if (isWeighed(item.unit)) { setWeighFor(weighFor === item.id ? null : item.id); setWeighG(""); return; }
     const ex = cart.find((c) => c.id === item.id);
-    if (ex && ex.qty + 1 > item.stock) return notify("Only " + item.stock + " " + item.unit + " in stock");
+    if (ex && ex.qty + 1 > item.stock) return notify("Only " + fmtQty(item.stock, item.unit) + " in stock");
     pushToCart(item);
+  };
+
+  // Add a weighed quantity (given in grams) of a kg item to the bill, capped at what's in stock.
+  const WEIGH_CHIPS = [250, 500, 750, 1000]; // quick-pick grams
+  const addWeight = (item, grams) => {
+    const g = Math.round(+grams || 0);
+    if (!(g > 0)) return notify("Enter a weight in grams.");
+    const kg = round3(g / 1000);
+    const inCart = cart.find((c) => c.id === item.id)?.qty || 0;
+    if (round3(inCart + kg) > (item.stock || 0)) return notify("Only " + fmtQty(item.stock, item.unit) + " in stock");
+    pushToCart(item, kg);
+    setWeighFor(null); setWeighG("");
   };
 
   // Scanning a barcode always adds the item to the bill — even at zero stock. A sold-out item is
@@ -1683,10 +1715,11 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
   };
   const setQty = (id, qty) => {
     const line = cart.find((c) => c.id === id);
+    qty = round3(qty); // keep fractional (kg) qty clean and drift-free
     // Misc / custom lines have no inventory item, so they aren't stock-limited.
     if (line && !line.misc) {
       const stock = items.find((i) => i.id === id)?.stock ?? 0;
-      if (qty > stock) { notify("Only " + stock + " in stock"); qty = stock; }
+      if (qty > stock) { notify("Only " + fmtQty(stock, line.unit) + " in stock"); qty = stock; }
     }
     const q = qty;
     setCart((cart) => (q <= 0 ? cart.filter((c) => c.id !== id) : cart.map((c) => (c.id === id ? { ...c, qty: q } : c))));
@@ -1701,7 +1734,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
     if (!(qty > 0)) return notify("Enter a quantity to add.");
     setItems((list) => list.map((i) => (i.id === item.id ? addBatch(i, qty, "", todayStr()) : i)));
     log("inventory", `Restocked “${item.name}” +${qty} (from billing)`);
-    notify(`Added ${qty} ${item.unit} to ${item.name}`);
+    notify(`Added ${fmtQty(qty, item.unit)} to ${item.name}`);
     setStockFor(null); setStockQty("");
   };
 
@@ -1790,7 +1823,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
       .filter(({ c, stock }) => c.qty > stock);
     if (short.length) {
       const { c, stock } = short[0];
-      return notify(`Only ${stock} ${c.unit} of ${c.name} left — adjust the bill.`);
+      return notify(`Only ${fmtQty(stock, c.unit)} of ${c.name} left — adjust the bill.`);
     }
     const now = new Date();
     const backDated = saleDate !== todayStr();
@@ -1865,6 +1898,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
             {results.map((i) => {
               const inStock = (i.stock || 0) > 0;
               const editing = stockFor === i.id;
+              const weighing = weighFor === i.id;
               return (
                 <div key={i.id} className="pick" style={{ position: "relative", cursor: inStock ? "pointer" : "default", background: inStock ? undefined : "#F0F2F0" }} onClick={inStock ? () => add(i) : undefined}>
                   <button title="Add stock" aria-label={"Add stock to " + i.name} onClick={(e) => { e.stopPropagation(); setStockFor(editing ? null : i.id); setStockQty(""); }}
@@ -1872,14 +1906,30 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
                   <div style={{ fontWeight: 700, fontSize: 13.5, paddingRight: 26 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}{soldQty[i.name] ? <span style={{ color: "#E8A33D", fontSize: 11, marginLeft: 4 }} title="best-seller">★</span> : null}</div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12.5 }}>
                     <span style={{ color: "#1B5E43", fontWeight: 800 }}>{INR(i.sellPrice)}<span style={{ color: "#8AA", fontWeight: 500 }}>/{i.unit}</span></span>
-                    <span style={{ color: !inStock || i.stock <= i.lowAt ? "#C44536" : "#789", fontWeight: !inStock ? 600 : 400 }}>{!inStock ? "Out of stock" : i.stock + " left"}</span>
+                    <span style={{ color: !inStock || i.stock <= i.lowAt ? "#C44536" : "#789", fontWeight: !inStock ? 600 : 400 }}>{!inStock ? "Out of stock" : fmtQty(i.stock, i.unit) + " left"}</span>
                   </div>
                   {editing && (
                     <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
-                      <input className="input" style={{ padding: "5px 7px", width: 64 }} type="number" min="1" autoFocus placeholder="Qty" value={stockQty}
+                      <input className="input" style={{ padding: "5px 7px", width: 64 }} type="number" min="0" step="any" autoFocus placeholder="Qty" value={stockQty}
                         onChange={(e) => setStockQty(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") quickRestock(i); }} />
                       <button className="btn small primary" onClick={() => quickRestock(i)}>Add</button>
                       <button className="btn small ghost" aria-label="Cancel" onClick={() => { setStockFor(null); setStockQty(""); }}>✕</button>
+                    </div>
+                  )}
+                  {weighing && (
+                    <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8 }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 6 }}>
+                        {WEIGH_CHIPS.map((g) => (
+                          <button key={g} className="btn small ghost" style={{ padding: "3px 8px" }} onClick={() => addWeight(i, g)}>{g < 1000 ? g + "g" : (g / 1000) + "kg"}</button>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input className="input" style={{ padding: "5px 7px", width: 68 }} type="number" min="1" step="1" autoFocus placeholder="grams" value={weighG}
+                          onChange={(e) => setWeighG(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addWeight(i, weighG); }} aria-label="Custom weight in grams" />
+                        <span style={{ fontSize: 11.5, color: "#6B7E74", minWidth: 44 }}>{+weighG > 0 ? "= " + INR(money(i.sellPrice * (+weighG) / 1000)) : "g"}</span>
+                        <button className="btn small primary" onClick={() => addWeight(i, weighG)}>Add</button>
+                        <button className="btn small ghost" aria-label="Cancel" onClick={() => { setWeighFor(null); setWeighG(""); }}>✕</button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1900,20 +1950,23 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
             </Empty>
           ) : (
             <>
-              {cart.map((c) => (
+              {cart.map((c) => {
+                const step = isWeighed(c.unit) ? 0.25 : 1; // kg lines step by 250 g, others by 1
+                return (
                 <div key={c.id} style={S.rcptLine}>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ marginRight: 4 }}>{c.icon || "📦"}</span>{c.name}</div>
-                    <div style={{ fontSize: 11.5, color: "#777" }}>{INR(c.sellPrice)} × {c.qty} {c.unit}</div>
+                    <div style={{ fontSize: 11.5, color: "#777" }}>{INR(c.sellPrice)} × {fmtQty(c.qty, c.unit)}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <button className="qty" aria-label={"Decrease " + c.name} onClick={() => setQty(c.id, c.qty - 1)}>−</button>
-                    <span style={{ minWidth: 22, textAlign: "center", fontWeight: 700 }}>{c.qty}</span>
-                    <button className="qty" aria-label={"Increase " + c.name} onClick={() => setQty(c.id, c.qty + 1)}>+</button>
+                    <button className="qty" aria-label={"Decrease " + c.name} onClick={() => setQty(c.id, c.qty - step)}>−</button>
+                    <span style={{ minWidth: 40, textAlign: "center", fontWeight: 700, fontSize: isWeighed(c.unit) ? 12 : undefined }}>{fmtQty(c.qty, c.unit)}</span>
+                    <button className="qty" aria-label={"Increase " + c.name} onClick={() => setQty(c.id, c.qty + step)}>+</button>
                   </div>
-                  <b style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{INR(c.sellPrice * c.qty)}</b>
+                  <b style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{INR(money(c.sellPrice * c.qty))}</b>
                 </div>
-              ))}
+                );
+              })}
               {/* Optional additional discount on the whole bill (₹ off, or a % of the subtotal). */}
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, paddingTop: 10, borderTop: "1px dashed #E0D9C4" }}>
                 <span style={{ fontSize: 12, fontWeight: 700, color: "#6B7E74" }}>Additional discount</span>
@@ -2163,7 +2216,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       const batches = stock > 0 ? [{ id: uid(), qty: stock, expiry: f.expiry || "", addedOn: todayStr() }] : [];
       const newItem = { ...base, id: uid(), stock, batches, createdAt: todayStr() };
       setItems((list) => [...list, newItem]);
-      log("inventory", `Added item “${base.name}” · ${stock} ${base.unit} @ ${INR(sell)}` + (f.expiry ? ` (exp ${f.expiry})` : ""));
+      log("inventory", `Added item “${base.name}” · ${fmtQty(stock, base.unit)} @ ${INR(sell)}` + (f.expiry ? ` (exp ${f.expiry})` : ""));
       notify("Item added to inventory");
     }
     setForm(null);
@@ -2446,7 +2499,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                     <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(i.sellPrice)}</td>
                     <td style={{ textAlign: "right", color: "#1B5E43" }}>{i.buyPrice ? Math.round(((i.sellPrice - i.buyPrice) / i.buyPrice) * 100) + "%" : "—"}</td>
                     <td style={{ textAlign: "right", fontWeight: 700, color: i.stock <= i.lowAt ? "#C44536" : "#223" }}>
-                      {i.stock} {i.unit}{i.stock <= i.lowAt && " ⚠"}
+                      {fmtQty(i.stock, i.unit)}{i.stock <= i.lowAt && " ⚠"}
                       {dte != null && dte <= 30 && <div style={{ fontSize: 10.5, fontWeight: 600, color: dte < 0 ? "#C44536" : "#B0762A" }}>{dte < 0 ? "expired" : "exp in " + dte + "d"}</div>}
                     </td>
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
@@ -2467,7 +2520,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                               <tbody>
                                 {batchEdit.rows.map((b) => (
                                   <tr key={b.id}>
-                                    <td><input className="input" style={{ padding: "6px 8px", width: 80 }} type="number" min="0" value={b.qty} onChange={(e) => setBatchField(b.id, "qty", e.target.value)} aria-label="Batch quantity" /></td>
+                                    <td><input className="input" style={{ padding: "6px 8px", width: 80 }} type="number" min="0" step="any" value={b.qty} onChange={(e) => setBatchField(b.id, "qty", e.target.value)} aria-label="Batch quantity" /></td>
                                     <td><input className="input" style={{ padding: "6px 8px" }} type="date" value={b.expiry} onChange={(e) => setBatchField(b.id, "expiry", e.target.value)} aria-label="Batch expiry" /></td>
                                     <td><input className="input" style={{ padding: "6px 8px" }} type="date" max={todayStr()} value={b.addedOn} onChange={(e) => setBatchField(b.id, "addedOn", e.target.value)} aria-label="Date added" /></td>
                                     <td><button className="btn small danger" aria-label="Remove batch" onClick={() => removeBatchRow(b.id)}>✕</button></td>
@@ -2480,7 +2533,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                               <button className="btn small ghost" onClick={addBatchRow}>+ Add batch</button>
                               <button className="btn small primary" onClick={saveBatchEdit}>✓ Save batches</button>
                               <button className="btn small ghost" onClick={() => setBatchEdit(null)}>Cancel</button>
-                              <span style={{ fontSize: 11.5, color: "#8A9C90", marginLeft: "auto" }}>New stock total: <b>{batchEditSum} {i.unit}</b></span>
+                              <span style={{ fontSize: 11.5, color: "#8A9C90", marginLeft: "auto" }}>New stock total: <b>{fmtQty(batchEditSum, i.unit)}</b></span>
                             </div>
                           </div>
                         ) : (
@@ -2494,7 +2547,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
                                     const col = bd == null ? "#677" : bd < 0 ? "#C44536" : bd <= 30 ? "#B0762A" : "#677";
                                     return (
                                       <tr key={b.id}>
-                                        <td style={{ fontWeight: 700 }}>{b.qty} {i.unit}</td>
+                                        <td style={{ fontWeight: 700 }}>{fmtQty(b.qty, i.unit)}</td>
                                         <td style={{ color: col, fontWeight: bd != null && bd <= 30 ? 700 : 400 }}>{b.expiry || "— no expiry —"}{bd != null && bd <= 30 ? (bd < 0 ? " (expired)" : ` (${bd}d left)`) : ""}</td>
                                         <td style={{ color: "#677" }}>{b.addedOn}</td>
                                       </tr>
@@ -2573,7 +2626,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
             <Field label="MRP (₹)"><input className="input" type="number" min="0" step="0.01" value={form.mrp} onChange={(e) => setForm({ ...form, mrp: e.target.value })} /></Field>
             <Field label="Buying price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.buyPrice} onChange={(e) => setForm({ ...form, buyPrice: e.target.value })} /></Field>
             <Field label="Selling price (₹)"><input className="input" type="number" min="0" step="0.01" value={form.sellPrice} onChange={(e) => setForm({ ...form, sellPrice: e.target.value })} /></Field>
-            <Field label={form.id ? "Stock quantity" : "Opening stock"}><input className="input" type="number" min="0" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>
+            <Field label={form.id ? "Stock quantity" : "Opening stock"}><input className="input" type="number" min="0" step="any" value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></Field>
             <Field label={form.id ? "Expiry (for added stock)" : "Expiry (optional)"}><input className="input" type="date" value={form.expiry} onChange={(e) => setForm({ ...form, expiry: e.target.value })} /></Field>
             <Field label="Alert when stock below"><input className="input" type="number" min="0" value={form.lowAt} onChange={(e) => setForm({ ...form, lowAt: e.target.value })} /></Field>
           </div>
@@ -2587,7 +2640,7 @@ function Inventory({ items, setItems, notify, log, cats = CATEGORIES, onAddCateg
       {restock && (
         <Modal title={"Restock — " + restock.name} onClose={() => setRestock(null)}>
           <Field label="Quantity to add">
-            <input className="input" type="number" min="0" autoFocus value={restock.qty} onChange={(e) => setRestock({ ...restock, qty: e.target.value })} />
+            <input className="input" type="number" min="0" step="any" autoFocus value={restock.qty} onChange={(e) => setRestock({ ...restock, qty: e.target.value })} />
           </Field>
           <Field label="Expiry date (optional)">
             <input className="input" type="date" value={restock.expiry} onChange={(e) => setRestock({ ...restock, expiry: e.target.value })} />
@@ -3108,7 +3161,7 @@ function RawData({ items, setItems, setSales, setExpenses, notify, log }) {
                     {rows.map((r, i) => (
                       <tr key={i}>
                         <td><input className="input" style={{ padding: "6px 8px" }} value={r.name} onChange={(e) => edit(i, "name", e.target.value)} /></td>
-                        <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" value={r.qty} onChange={(e) => edit(i, "qty", +e.target.value)} /></td>
+                        <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" step="any" value={r.qty} onChange={(e) => edit(i, "qty", +e.target.value)} /></td>
                         {mode === "inventory" ? (
                           <>
                             <td>
@@ -3500,7 +3553,7 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
                 <div style={{ background: "#F4F7F4", borderRadius: 8, padding: "8px 12px", margin: "0 0 8px" }}>
                   {s.lines.map((l, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
-                      <span>{l.name} × {l.qty}</span><span>{INR(l.amount)}</span>
+                      <span>{l.name} × {fmtQty(l.qty, l.unit)}</span><span>{INR(l.amount)}</span>
                     </div>
                   ))}
                   {s.discount > 0 && (
@@ -3546,7 +3599,7 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
               {editing.lines.map((l, idx) => (
                 <tr key={idx}>
                   <td>{l.name}<div style={{ fontSize: 11, color: "#9AA" }}>{INR(l.price)}/{l.unit}</div></td>
-                  <td><input className="input" style={{ padding: "6px 8px" }} type="number" min="0" value={l.qty} onChange={(e) => editLine(idx, +e.target.value)} /></td>
+                  <td><div style={{ display: "flex", alignItems: "center", gap: 4 }}><input className="input" style={{ padding: "6px 8px", width: 72 }} type="number" min="0" step="any" value={l.qty} onChange={(e) => editLine(idx, +e.target.value)} /><span style={{ fontSize: 11, color: "#9AA" }}>{l.unit}</span></div></td>
                   <td style={{ textAlign: "right", fontWeight: 700 }}>{INR(money(l.price * l.qty))}</td>
                   <td><button className="btn small danger" aria-label="Remove line" onClick={() => removeLine(idx)}>✕</button></td>
                 </tr>
@@ -3575,7 +3628,7 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
                       <span style={{ fontSize: 13 }}><span style={{ marginRight: 5 }}>{i.icon || "📦"}</span>{i.name}</span>
                       <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>
                         <span style={{ color: "#1B5E43", fontWeight: 700 }}>{INR(i.sellPrice)}</span>
-                        <span style={{ marginLeft: 8, color: inStock ? "#789" : "#C44536", fontWeight: inStock ? 400 : 600 }}>{inStock ? `${+i.stock || 0} left` : "Out of stock"}</span>
+                        <span style={{ marginLeft: 8, color: inStock ? "#789" : "#C44536", fontWeight: inStock ? 400 : 600 }}>{inStock ? `${fmtQty(i.stock, i.unit)} left` : "Out of stock"}</span>
                       </span>
                     </div>
                   );
@@ -3732,7 +3785,7 @@ function Alerts({ items, goInventory, cats = CATEGORIES }) {
                   <tr key={i.id}>
                     <td style={{ fontWeight: 600 }}><span style={{ marginRight: 6 }}>{i.icon || "📦"}</span>{i.name}</td>
                     <td style={{ color: "#677" }}>{i.category}</td>
-                    <td style={{ textAlign: "right", fontWeight: 800, color: i.stock <= 0 ? "#C44536" : "#B0762A" }}>{i.stock} {i.unit}</td>
+                    <td style={{ textAlign: "right", fontWeight: 800, color: i.stock <= 0 ? "#C44536" : "#B0762A" }}>{fmtQty(i.stock, i.unit)}</td>
                     <td style={{ textAlign: "right", color: "#789" }}>{i.lowAt}</td>
                   </tr>
                 ))}
@@ -3750,7 +3803,7 @@ function Alerts({ items, goInventory, cats = CATEGORIES }) {
                   <tr key={idx}>
                     <td style={{ fontWeight: 600 }}><span style={{ marginRight: 6 }}>{r.item.icon || "📦"}</span>{r.item.name}</td>
                     <td style={{ color: "#677" }}>{r.item.category}</td>
-                    <td style={{ textAlign: "right", fontWeight: 700 }}>{r.b.qty} {r.item.unit}</td>
+                    <td style={{ textAlign: "right", fontWeight: 700 }}>{fmtQty(r.b.qty, r.item.unit)}</td>
                     <td>{r.b.expiry}</td>
                     <td style={{ textAlign: "right", fontWeight: 700, color: r.d < 0 ? "#C44536" : "#B0762A" }}>{r.d < 0 ? `${-r.d}d ago` : `in ${r.d}d`}</td>
                   </tr>
@@ -4544,7 +4597,7 @@ function Stats({ sales, expenses, items }) {
               ) : (
                 <>
                   {dead.slice(0, 10).map((i) => (
-                    <div key={i.name} style={S.row}><span>{i.name} <span style={{ color: "#9AA", fontSize: 11 }}>· {i.stock} {i.unit}</span></span><b>{formatINR(i.value)}</b></div>
+                    <div key={i.name} style={S.row}><span>{i.name} <span style={{ color: "#9AA", fontSize: 11 }}>· {fmtQty(i.stock, i.unit)}</span></span><b>{formatINR(i.value)}</b></div>
                   ))}
                   {dead.length > 10 && <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 6 }}>+ {dead.length - 10} more…</div>}
                 </>
@@ -4768,7 +4821,7 @@ function Udhari({ sales, setSales, notify, log }) {
                                     <div style={{ fontSize: 12.5, color: "#8A9C90" }}>No line items on this bill.</div>
                                   ) : (b.lines).map((l, i) => (
                                     <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
-                                      <span>{l.name} × {l.qty}</span><span>{INR(l.amount)}</span>
+                                      <span>{l.name} × {fmtQty(l.qty, l.unit)}</span><span>{INR(l.amount)}</span>
                                     </div>
                                   ))}
                                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, borderTop: "1px dashed #DDE8DE", marginTop: 4, paddingTop: 4 }}>
