@@ -1706,14 +1706,13 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
   };
 
   // Add an item to the bill from the Misc row — and catalogue it. A name + sell price is required;
-  // the barcode is optional (given → the item scans directly next time). Rather than a throwaway
-  // misc line, this registers a REAL inventory item with an opening stock of 20 and a category
-  // auto-guessed from the name, so the shop's catalogue grows as it bills. The cart line is
-  // inventory-backed (real id), so completing the sale depletes that stock (20 → 19 …) like any item.
-  // Cost/buy price defaults to 80% of the sell price (≈20% margin), since this row has no buy field.
-  // If the name/barcode already belongs to a catalogued item, that item is billed instead — no
-  // duplicate is created and no extra stock is added.
-  const OPENING_STOCK = 20;     // opening stock for a quick-catalogued item
+  // the barcode is optional (given → the item scans directly next time). Beyond a throwaway misc
+  // line, this registers a REAL inventory item (category auto-guessed from the name) so the shop's
+  // catalogue grows as it bills — but at 0 opening stock; the owner sets the true count later from
+  // Inventory. The bill line is a misc line, so the item still sells now without being blocked by
+  // that 0 stock, and no phantom units are ever fabricated. Cost/buy price defaults to 80% of sell
+  // (≈20% margin), since this row has no buy field. If the name/barcode already belongs to a
+  // catalogued item, that item is billed instead — no duplicate is created.
   const BUY_PRICE_RATIO = 0.8;  // default cost = 80% of sell price (≈20% margin)
   const addMisc = () => {
     const price = +miscPrice;
@@ -1735,16 +1734,17 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const category = guessCategory(name, items) || "Other"; // auto-corrected from the name
     const sell = money(price);
-    const batches = [{ id: uid(), qty: OPENING_STOCK, expiry: "", addedOn: todayStr() }];
     const newItem = {
       name, code: codes[0] || "", barcodes: codes.slice(1), category, unit: "pc",
       icon: iconFor(category), buyPrice: money(sell * BUY_PRICE_RATIO), sellPrice: sell, mrp: sell,
-      lowAt: 5, id: uid(), stock: OPENING_STOCK, batches, createdAt: todayStr(),
+      lowAt: 5, id: uid(), stock: 0, batches: [], createdAt: todayStr(),
     };
     setItems((list) => [...list, newItem]);
-    pushToCart(newItem); // inventory-backed cart line (real id) → stock depletes on sale
-    log("inventory", `Added item “${name}” · ${OPENING_STOCK} pc @ ${INR(sell)} (cost ${INR(newItem.buyPrice)}) · ${category} (from billing${codes[0] ? `, barcode ${codes[0]}` : ""})`);
-    notify(`Added “${name}” to inventory (${category}, stock ${OPENING_STOCK}) & this bill`);
+    // Bill it as a misc line: not stock-limited (so the fresh 0-stock item still sells) and it
+    // neither depletes nor fabricates stock. The item is catalogued for next time all the same.
+    setCart((cart) => [...cart, { id: newItem.id, name, icon: newItem.icon, unit: "pc", sellPrice: sell, buyPrice: newItem.buyPrice, qty: 1, misc: true }]);
+    log("inventory", `Catalogued item “${name}” @ ${INR(sell)} (cost ${INR(newItem.buyPrice)}) · ${category} · 0 stock (from billing${codes[0] ? `, barcode ${codes[0]}` : ""})`);
+    notify(`Added “${name}” to this bill & catalogued it (${category}, 0 stock)`);
     setMiscName(""); setMiscPrice(""); setMiscCode("");
   };
 
@@ -1853,7 +1853,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
             style={{ marginBottom: 12 }}
           />
           {/* Misc row → quick "add & catalogue": bills the item AND registers it in inventory
-              (opening stock 20, auto category). Barcode is optional; given → it scans next time. */}
+              (0 opening stock, auto category). Barcode is optional; given → it scans next time. */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 12, padding: "8px 10px", background: "#F4F7F4", borderRadius: 8 }}>
             <span style={{ fontSize: 11.5, fontWeight: 700, color: "#465", whiteSpace: "nowrap" }}>🧾 Misc</span>
             <input ref={miscNameRef} className="input" style={{ flex: 1, minWidth: 90 }} placeholder="Name" value={miscName} onChange={(e) => setMiscName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addMisc(); }} aria-label="Item name" />
@@ -3218,7 +3218,6 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
   // Matches Billing's picker + Misc row so the two flows behave identically. Nothing here changes
   // stock directly for existing items — saveEdit reconciles stock by name (orig vs new lines), so a
   // line added here simply depletes that item's stock by its qty when the edit is saved.
-  const OPENING_STOCK = 20;     // opening stock for a quick-catalogued item (same as Billing)
   const BUY_PRICE_RATIO = 0.8;  // default cost = 80% of sell price (≈20% margin)
   const resetAddItem = () => { setAddQ(""); setNewName(""); setNewCode(""); setNewPrice(""); };
   const closeEdit = () => { setEditing(null); resetAddItem(); };
@@ -3254,9 +3253,10 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
   };
 
   // Quick-catalogue a brand-new item and put it on the bill (mirrors Billing's Misc row): registers a
-  // real inventory item (opening stock 20, cost 80% of sell, auto category) so the catalogue grows,
-  // then adds a bill line whose qty is deducted from that stock on save. If the name/barcode already
-  // belongs to a catalogued item, that item is added instead — no duplicate is created.
+  // real inventory item (0 opening stock, cost 80% of sell, auto category) so the catalogue grows,
+  // then adds it as a misc bill line — so it isn't blocked by the 0 stock and no phantom units are
+  // fabricated. If the name/barcode already belongs to a catalogued item, that item is added
+  // instead — no duplicate is created.
   const addNewItem = () => {
     if (!editing) return;
     const price = +newPrice;
@@ -3271,16 +3271,16 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
     const category = guessCategory(name, items) || "Other";
     const sell = money(price);
-    const batches = [{ id: uid(), qty: OPENING_STOCK, expiry: "", addedOn: todayStr() }];
     const newItem = {
       name, code: codes[0] || "", barcodes: codes.slice(1), category, unit: "pc",
       icon: iconFor(category), buyPrice: money(sell * BUY_PRICE_RATIO), sellPrice: sell, mrp: sell,
-      lowAt: 5, id: uid(), stock: OPENING_STOCK, batches, createdAt: todayStr(),
+      lowAt: 5, id: uid(), stock: 0, batches: [], createdAt: todayStr(),
     };
     setItems((list) => [...list, newItem]);
-    setEditing((e) => (e ? { ...e, lines: [...e.lines, { name, qty: 1, unit: "pc", price: sell, buyPrice: newItem.buyPrice, amount: sell }] } : e));
-    log("inventory", `Added item “${name}” · ${OPENING_STOCK} pc @ ${INR(sell)} (cost ${INR(newItem.buyPrice)}) · ${category} (from bill edit${codes[0] ? `, barcode ${codes[0]}` : ""})`);
-    notify(`Added “${name}” to inventory (${category}, stock ${OPENING_STOCK}) & this bill`);
+    // Add as a misc line so saveEdit's stock reconciliation skips it (no deplete, no phantom stock).
+    setEditing((e) => (e ? { ...e, lines: [...e.lines, { name, qty: 1, unit: "pc", price: sell, buyPrice: newItem.buyPrice, amount: sell, misc: true }] } : e));
+    log("inventory", `Catalogued item “${name}” @ ${INR(sell)} (cost ${INR(newItem.buyPrice)}) · ${category} · 0 stock (from bill edit${codes[0] ? `, barcode ${codes[0]}` : ""})`);
+    notify(`Added “${name}” to this bill & catalogued it (${category}, 0 stock)`);
     resetAddItem();
   };
 
@@ -3593,7 +3593,7 @@ function SalesHistory({ sales, items, setSales, setItems, store = STORE, notify,
               <input className="input" style={{ width: 86 }} type="number" min="0" step="0.01" placeholder="₹ sell" value={newPrice} onChange={(e) => setNewPrice(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addNewItem(); }} aria-label="New item sell price" />
               <button className="btn" onClick={addNewItem}>+ Add</button>
             </div>
-            <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 6 }}>New items are catalogued (opening stock {OPENING_STOCK}); the quantity on this bill is deducted from stock when you save.</div>
+            <div style={{ fontSize: 11, color: "#8A9C90", marginTop: 6 }}>New items are catalogued at 0 stock and billed as a misc line; set the real stock later from Inventory.</div>
           </div>
 
           <Field label="Additional discount (₹)">
