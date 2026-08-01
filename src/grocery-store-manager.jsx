@@ -1091,12 +1091,44 @@ function StoreManager({ user, onLogout }) {
   }, [items, sales, expenses, logs, bills, dailyBills, loaded]);
 
   const toastTimer = useRef(null);
+  // While true, a plain (non-warning) toast is swallowed. It is set for a single tick right after a
+  // write is refused for being offline, so the caller's own follow-up "✓ saved" toast can't overwrite
+  // the "you're offline" message and mislead the owner into thinking the change went through.
+  const suppressOkToast = useRef(false);
   const notify = (msg) => {
+    if (suppressOkToast.current && !/^\s*[⚠🔴]/u.test(String(msg))) return;
     if (toastTimer.current) clearTimeout(toastTimer.current); // don't let an old timer cut a new toast short
     setToast(msg);
     toastTimer.current = setTimeout(() => { setToast(null); toastTimer.current = null; }, 2200);
   };
   notifyRef.current = notify; // let the cloud listener surface errors via the same toast
+
+  // ---- Online-only writes ---------------------------------------------------------------------
+  // The store must be connected to the cloud to make changes. Every setter handed to a section is
+  // wrapped so that, while offline, the write is refused — local state AND the cloud stay untouched —
+  // and the owner is told to reconnect. The RAW setters keep being used by the sync / cache / restore
+  // paths above, which must run regardless of connection. `online` is the live RTDB `.info/connected`
+  // signal (see subscribeConnection), i.e. "a write will actually reach the cloud", not just "device
+  // has some network".
+  const OFFLINE_MSG = "🔴 You're offline — reconnect to the internet to make changes.";
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  const guardWrite = useCallback((rawSetter) => (arg) => {
+    if (!onlineRef.current) {
+      notifyRef.current?.(OFFLINE_MSG);
+      suppressOkToast.current = true;
+      Promise.resolve().then(() => { suppressOkToast.current = false; }); // lift the guard after this tick
+      return;
+    }
+    return rawSetter(arg);
+  }, []);
+  const setItemsW = useMemo(() => guardWrite(setItems), [guardWrite]);
+  const setSalesW = useMemo(() => guardWrite(setSales), [guardWrite]);
+  const setExpensesW = useMemo(() => guardWrite(setExpenses), [guardWrite]);
+  const setLogsW = useMemo(() => guardWrite(setLogs), [guardWrite]);
+  const setBillsW = useMemo(() => guardWrite(setBills), [guardWrite]);
+  const setDailyBillsW = useMemo(() => guardWrite(setDailyBills), [guardWrite]);
+  const setConfigW = useMemo(() => guardWrite(setConfig), [guardWrite]);
 
   // Persist owner-added categories locally; the full list shown everywhere merges these with the
   // built-ins and any category already on an item.
@@ -1130,6 +1162,7 @@ function StoreManager({ user, onLogout }) {
 
   // Append an entry to the global activity log (newest first; capped to protect storage).
   const addLog = (type, message) => {
+    if (!onlineRef.current) return; // logs are a synced slice too — no writes while offline (silent: the triggering action already told the owner)
     const now = new Date();
     setLogs((l) =>
       [
@@ -1164,6 +1197,7 @@ function StoreManager({ user, onLogout }) {
     const f = e.target.files?.[0];
     e.target.value = ""; // allow re-importing the same file later
     if (!f) return;
+    if (!online) { notify(OFFLINE_MSG); return; } // restore rewrites everything — require a connection
     try {
       const ext = (f.name.split(".").pop() || "").toLowerCase();
       const d = ext === "xlsx" || ext === "xls" ? await importXlsx(f) : JSON.parse(await f.text());
@@ -1249,7 +1283,7 @@ function StoreManager({ user, onLogout }) {
         <div style={{ fontSize: 11, color: "#6E8A7C", padding: "6px 14px 8px" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, marginBottom: 3 }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: online ? "#3FB873" : "#C9803A", display: "inline-block" }} />
-            {online ? "Online · syncing live" : "Offline · saved on this device"}
+            {online ? "Online · syncing live" : "Offline · changes disabled until reconnected"}
           </span>
           <br />
           {user?.email ? <>Signed in as {user.email}.<br /></> : null}Back up regularly.
@@ -1263,43 +1297,75 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "dashboard" ? (
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         ) : tab === "billing" ? (
-          <Billing items={items} sales={sales} setItems={setItems} setSales={setSales} store={store} notify={notify} log={addLog} />
+          <Billing items={items} sales={sales} setItems={setItemsW} setSales={setSalesW} store={store} notify={notify} log={addLog} />
         ) : tab === "raw" ? (
-          <RawData items={items} setItems={setItems} setSales={setSales} setExpenses={setExpenses} notify={notify} log={addLog} />
+          <RawData items={items} setItems={setItemsW} setSales={setSalesW} setExpenses={setExpensesW} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
-          <Inventory items={items} setItems={setItems} notify={notify} log={addLog} cats={cats} onAddCategory={addCategory} />
+          <Inventory items={items} setItems={setItemsW} notify={notify} log={addLog} cats={cats} onAddCategory={addCategory} />
         ) : tab === "alerts" ? (
           <Alerts items={items} goInventory={() => setTab("inventory")} cats={cats} />
         ) : tab === "barcode" ? (
-          <BarcodeCreator items={items} setItems={setItems} store={store} notify={notify} log={addLog} />
+          <BarcodeCreator items={items} setItems={setItemsW} store={store} notify={notify} log={addLog} />
         ) : tab === "sales" ? (
-          <SalesHistory sales={sales} items={items} setSales={setSales} setItems={setItems} store={store} notify={notify} log={addLog} />
+          <SalesHistory sales={sales} items={items} setSales={setSalesW} setItems={setItemsW} store={store} notify={notify} log={addLog} />
         ) : tab === "finance" && tabEnabled("finance") ? (
           <Finance sales={sales} expenses={expenses} />
         ) : tab === "stats" ? (
           <Stats sales={sales} expenses={expenses} items={items} />
         ) : tab === "udhari" ? (
-          <Udhari sales={sales} setSales={setSales} notify={notify} log={addLog} />
+          <Udhari sales={sales} setSales={setSalesW} notify={notify} log={addLog} />
         ) : tab === "expense" ? (
-          <Expenses expenses={expenses} setExpenses={setExpenses} notify={notify} log={addLog} />
+          <Expenses expenses={expenses} setExpenses={setExpensesW} notify={notify} log={addLog} />
         ) : tab === "vendorbills" ? (
-          <VendorBills bills={bills} setBills={setBills} setDailyBills={setDailyBills} goDailyBills={() => setTab("dailybills")} online={online} notify={notify} log={addLog} />
+          <VendorBills bills={bills} setBills={setBillsW} setDailyBills={setDailyBillsW} goDailyBills={() => setTab("dailybills")} online={online} notify={notify} log={addLog} />
         ) : tab === "dailybills" ? (
-          <DailyBills dailyBills={dailyBills} setDailyBills={setDailyBills} bills={bills} setBills={setBills} goVendorBills={() => setTab("vendorbills")} notify={notify} log={addLog} />
+          <DailyBills dailyBills={dailyBills} setDailyBills={setDailyBillsW} bills={bills} setBills={setBillsW} goVendorBills={() => setTab("vendorbills")} notify={notify} log={addLog} />
         ) : tab === "logs" ? (
-          <Logs logs={logs} setLogs={setLogs} notify={notify} />
+          <Logs logs={logs} setLogs={setLogsW} notify={notify} />
         ) : tab === "changelog" ? (
           <Changelog />
         ) : tab === "settings" ? (
-          <StoreConfig config={config} setConfig={setConfig} notify={notify} log={addLog} />
+          <StoreConfig config={config} setConfig={setConfigW} notify={notify} log={addLog} />
         ) : tab === "admin" ? (
-          <Admin items={items} setItems={setItems} setSales={setSales} setExpenses={setExpenses} setLogs={setLogs} user={user} notify={notify} log={addLog} />
+          <Admin items={items} setItems={setItemsW} setSales={setSalesW} setExpenses={setExpensesW} setLogs={setLogsW} user={user} notify={notify} log={addLog} />
         ) : (
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         )}
       </main>
 
       {toast && <div style={S.toast}>{toast}</div>}
+      <ConnPill online={online} />
+    </div>
+  );
+}
+
+// Always-visible connection badge, pinned to a screen corner so the live status shows on EVERY
+// section (not just the sidebar). Red + "changes disabled" makes it obvious why a write was refused.
+// pointerEvents:none so it never intercepts a click on the content beneath it.
+function ConnPill({ online }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      title={online
+        ? "Connected to the cloud — changes are saved live."
+        : "No connection — changes are disabled until you reconnect."}
+      style={{
+        position: "fixed", right: 16, bottom: 16, zIndex: 70, pointerEvents: "none",
+        display: "inline-flex", alignItems: "center", gap: 7,
+        padding: "6px 12px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap",
+        color: "#fff", userSelect: "none",
+        background: online ? "#1E7A46" : "#B23A2E",
+        border: "1px solid " + (online ? "#2F9E5C" : "#D2503F"),
+        boxShadow: "0 4px 14px rgba(0,0,0,.28)",
+      }}
+    >
+      <span style={{
+        width: 9, height: 9, borderRadius: "50%", display: "inline-block",
+        background: online ? "#6CE39A" : "#FFC9C0",
+        boxShadow: "0 0 0 3px " + (online ? "rgba(108,227,154,.25)" : "rgba(255,201,192,.25)"),
+      }} />
+      {online ? "Online" : "Offline · changes disabled"}
     </div>
   );
 }
