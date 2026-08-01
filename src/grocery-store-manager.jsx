@@ -949,6 +949,7 @@ function StoreManager({ user, onLogout }) {
   const [config, setConfig] = useState(() => readCachedConfig());
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState(null);
+  const [blockPopup, setBlockPopup] = useState(null); // big red "can't make changes" pop-up (offline write refusals)
 
   // ---- Realtime Database sync (live across every signed-in device) ----
   // Every record (item/sale/expense/log) lives at its own keyed node — shop/<slice>/<id> —
@@ -1110,18 +1111,23 @@ function StoreManager({ user, onLogout }) {
   // paths above, which must run regardless of connection. `online` is the live RTDB `.info/connected`
   // signal (see subscribeConnection), i.e. "a write will actually reach the cloud", not just "device
   // has some network".
-  const OFFLINE_MSG = "🔴 You're offline — reconnect to the internet to make changes.";
   const onlineRef = useRef(online);
   onlineRef.current = online;
-  const guardWrite = useCallback((rawSetter) => (arg) => {
-    if (!onlineRef.current) {
-      notifyRef.current?.(OFFLINE_MSG);
-      suppressOkToast.current = true;
-      Promise.resolve().then(() => { suppressOkToast.current = false; }); // lift the guard after this tick
-      return;
-    }
-    return rawSetter(arg);
+  // A refused write throws up a big, red, centred pop-up (not the small green toast) so it's
+  // impossible to miss. It auto-clears after a few seconds; suppressOkToast also blocks the
+  // caller's own follow-up "✓ saved" toast so nothing masks the real outcome.
+  const blockTimer = useRef(null);
+  const refuseOffline = useCallback(() => {
+    setBlockPopup("You’re offline — reconnect to the internet to make changes.");
+    if (blockTimer.current) clearTimeout(blockTimer.current);
+    blockTimer.current = setTimeout(() => { setBlockPopup(null); blockTimer.current = null; }, 3600);
+    suppressOkToast.current = true;
+    Promise.resolve().then(() => { suppressOkToast.current = false; }); // lift the guard after this tick
   }, []);
+  const guardWrite = useCallback((rawSetter) => (arg) => {
+    if (!onlineRef.current) { refuseOffline(); return; }
+    return rawSetter(arg);
+  }, [refuseOffline]);
   const setItemsW = useMemo(() => guardWrite(setItems), [guardWrite]);
   const setSalesW = useMemo(() => guardWrite(setSales), [guardWrite]);
   const setExpensesW = useMemo(() => guardWrite(setExpenses), [guardWrite]);
@@ -1197,7 +1203,7 @@ function StoreManager({ user, onLogout }) {
     const f = e.target.files?.[0];
     e.target.value = ""; // allow re-importing the same file later
     if (!f) return;
-    if (!online) { notify(OFFLINE_MSG); return; } // restore rewrites everything — require a connection
+    if (!online) { refuseOffline(); return; } // restore rewrites everything — require a connection
     try {
       const ext = (f.name.split(".").pop() || "").toLowerCase();
       const d = ext === "xlsx" || ext === "xls" ? await importXlsx(f) : JSON.parse(await f.text());
@@ -1334,6 +1340,17 @@ function StoreManager({ user, onLogout }) {
       </main>
 
       {toast && <div style={S.toast}>{toast}</div>}
+      {blockPopup && (
+        <div style={S.blockOverlay}>
+          <div style={S.blockPopup} role="alert" aria-live="assertive">
+            <div style={{ fontSize: 34, lineHeight: 1 }}>⛔</div>
+            <div>
+              <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 3 }}>Can’t make changes</div>
+              <div style={{ fontSize: 14.5, lineHeight: 1.35, opacity: 0.95 }}>{blockPopup}</div>
+            </div>
+          </div>
+        </div>
+      )}
       <ConnPill online={online} />
     </div>
   );
@@ -6141,11 +6158,14 @@ const S = {
   rcptTotal: { display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 18, paddingTop: 12, marginTop: 6, borderTop: "2px dashed #C9BF9F" },
   badge: { background: "#C44536", color: "#fff", fontSize: 10.5, fontWeight: 800, borderRadius: 9, padding: "1px 7px", marginLeft: 8 },
   toast: { position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: "#10331F", color: "#fff", padding: "10px 20px", borderRadius: 10, fontSize: 13.5, boxShadow: "0 6px 20px rgba(0,0,0,.25)", zIndex: 60 },
+  blockOverlay: { position: "fixed", inset: 0, display: "grid", placeItems: "center", zIndex: 90, pointerEvents: "none", background: "rgba(20,10,8,.18)" },
+  blockPopup: { display: "flex", alignItems: "center", gap: 16, background: "#C0392B", color: "#fff", padding: "20px 26px", borderRadius: 16, width: "min(440px, 92vw)", border: "1.5px solid #E0604F", boxShadow: "0 18px 50px rgba(120,20,10,.45)", animation: "blockpop .18s ease-out" },
   overlay: { position: "fixed", inset: 0, background: "rgba(15,30,20,.45)", display: "grid", placeItems: "center", zIndex: 50 },
   modal: { background: "#fff", borderRadius: 16, padding: 20, width: "min(480px, 92vw)", maxHeight: "86vh", overflow: "auto" },
 };
 
 const CSS = `
+  @keyframes blockpop { from { opacity:0; transform:scale(.9) translateY(-6px); } to { opacity:1; transform:scale(1) translateY(0); } }
   .navbtn { display:flex; align-items:center; gap:6px; width:100%; text-align:left; background:none; border:none; color:#BCD2C4; padding:10px 12px; border-radius:9px; font-size:13.5px; font-weight:600; cursor:pointer; position:relative; }
   .navbtn:hover { background:#1A4A2E; color:#fff; }
   .navbtn.active { background:#1B5E43; color:#fff; }
