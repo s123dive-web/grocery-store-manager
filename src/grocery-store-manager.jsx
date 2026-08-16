@@ -1033,7 +1033,9 @@ function StoreManager({ user, onLogout }) {
     lastRemote.current[slice] = nextMap; // optimistic; the echo snapshot confirms it
     writeSlice(slice, updates).catch((e) => {
       console.error("sync write failed", slice, e);
-      notify("⚠ Couldn't sync to cloud — saved on this device, will retry when back online.");
+      // Not a queued retry: a rejected write is rolled back by the RTDB client, and the next
+      // snapshot reverts this device too — so the change is genuinely gone, not "pending".
+      notify("⚠ The cloud rejected that change — it was NOT saved. Check the connection, then do it again.");
     });
   }, []);
   useEffect(() => { if (!loaded) return; const t = setTimeout(() => pushSlice("items", items), 300); return () => clearTimeout(t); }, [items, loaded, pushSlice]);
@@ -1124,10 +1126,20 @@ function StoreManager({ user, onLogout }) {
     suppressOkToast.current = true;
     Promise.resolve().then(() => { suppressOkToast.current = false; }); // lift the guard after this tick
   }, []);
-  const guardWrite = useCallback((rawSetter) => (arg) => {
-    if (!onlineRef.current) { refuseOffline(); return; }
-    return rawSetter(arg);
+  // Ask BEFORE a multi-step action starts whether it may write: true → go ahead; false → it was
+  // refused (the red pop-up is already up) and the caller must abort without touching anything
+  // else. A guarded setter alone isn't enough for an action like completing a sale, which also
+  // clears the cart, arms the receipt and says "Bill saved" — those steps have to be skipped too,
+  // otherwise a refused bill looks exactly like a saved one and quietly disappears.
+  const canWrite = useCallback(() => {
+    if (onlineRef.current) return true;
+    refuseOffline();
+    return false;
   }, [refuseOffline]);
+  const guardWrite = useCallback((rawSetter) => (arg) => {
+    if (!canWrite()) return;
+    return rawSetter(arg);
+  }, [canWrite]);
   const setItemsW = useMemo(() => guardWrite(setItems), [guardWrite]);
   const setSalesW = useMemo(() => guardWrite(setSales), [guardWrite]);
   const setExpensesW = useMemo(() => guardWrite(setExpenses), [guardWrite]);
@@ -1303,7 +1315,7 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "dashboard" ? (
           <Dashboard items={items} sales={sales} lowStock={lowStock} goBilling={() => setTab("billing")} />
         ) : tab === "billing" ? (
-          <Billing items={items} sales={sales} setItems={setItemsW} setSales={setSalesW} store={store} notify={notify} log={addLog} />
+          <Billing items={items} sales={sales} setItems={setItemsW} setSales={setSalesW} canWrite={canWrite} store={store} notify={notify} log={addLog} />
         ) : tab === "raw" ? (
           <RawData items={items} setItems={setItemsW} setSales={setSalesW} setExpenses={setExpensesW} notify={notify} log={addLog} />
         ) : tab === "inventory" ? (
@@ -1653,7 +1665,7 @@ function Dashboard({ items, sales, lowStock, goBilling }) {
 }
 
 // ---------- Billing / POS ----------
-function Billing({ items, sales, setItems, setSales, store = STORE, notify, log }) {
+function Billing({ items, sales, setItems, setSales, canWrite = () => true, store = STORE, notify, log }) {
   const [q, setQ] = useState("");
   const [cart, setCart] = useState([]); // {id, name, icon, unit, sellPrice, buyPrice, qty}
   const [lastSale, setLastSale] = useState(null);
@@ -1788,6 +1800,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
   const SCAN_RESTOCK_QTY = 5;
   const addScannedItem = (item) => {
     if ((item.stock || 0) <= 0) {
+      if (!canWrite()) return; // offline → the restock can't be saved, so don't claim it happened
       setItems((list) => list.map((i) => (i.id === item.id && (i.stock || 0) <= 0 ? addBatch(i, SCAN_RESTOCK_QTY, "", todayStr()) : i)));
       log("inventory", `Auto-restocked “${item.name}” to ${SCAN_RESTOCK_QTY} (scanned at billing while out of stock)`);
       notify(`“${item.name}” was out of stock — restocked to ${SCAN_RESTOCK_QTY} and added.`);
@@ -1815,6 +1828,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
   const quickRestock = (item) => {
     const qty = +stockQty;
     if (!(qty > 0)) return notify("Enter a quantity to add.");
+    if (!canWrite()) return; // offline → keep the typed quantity so it can be re-tried as-is
     setItems((list) => list.map((i) => (i.id === item.id ? addBatch(i, qty, "", todayStr()) : i)));
     log("inventory", `Restocked “${item.name}” +${qty} (from billing)`);
     notify(`Added ${fmtQty(qty, item.unit)} to ${item.name}`);
@@ -1848,6 +1862,7 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
     // New item: a typed barcode must not already belong to another product.
     const bcClash = findBarcodeClash(codes, items);
     if (bcClash) return notify(`Barcode “${bcClash.code}” already belongs to “${bcClash.item.name}”.`);
+    if (!canWrite()) return; // offline → the new item can't be catalogued; keep the typed row intact
     const category = guessCategory(name, items) || "Other"; // auto-corrected from the name
     const sell = money(price);
     const newItem = {
@@ -1898,6 +1913,12 @@ function Billing({ items, sales, setItems, setSales, store = STORE, notify, log 
 
   const completeSale = () => {
     if (cart.length === 0) return;
+    // Offline the bill CANNOT be recorded (setSales is refused), so bail out before anything is
+    // consumed — the cart, customer, discount and payment mode all stay exactly as they are, no
+    // receipt is armed and nothing claims success. Press "Complete sale" again once the connection
+    // is back and the very same bill is recorded for real. Without this the sale was silently lost:
+    // the cart cleared and the receipt printed, but the bill never reached Sales History.
+    if (!canWrite()) return;
     // Re-check against the latest stock: another device (or a just-synced change) may have
     // reduced it since these lines were added to the cart. Block rather than oversell.
     const short = cart
