@@ -67,6 +67,14 @@ const todayStr = () => dateStr(new Date());
 // "2026-08-12" -> "12 Aug 2026". Used wherever a stored date is shown to a customer
 // (statements) rather than to the shopkeeper, who reads the raw ISO form fine.
 const fmtDay = (d) => (d ? new Date(d + "T00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
+// Wording for a statement's "billed in this window" total. A single-day window is the
+// closing-time bill handed over the counter, so it names the day instead of staying generic.
+const billedLabel = (st) => {
+  const n = st.totals.billCount;
+  const bills = `${n} bill${n === 1 ? "" : "s"}`;
+  if (st.from && st.from === st.to) return `Billed ${st.from === todayStr() ? "today" : fmtDay(st.from)} (${bills})`;
+  return `Billed (${bills})`;
+};
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 // A short, human-readable bill reference derived from the (already-unique) sale id: last 6 chars,
 // upper-cased. Printed on the receipt AND stamped into the UPI note so a received payment can be
@@ -304,9 +312,10 @@ function printStatement(st, store = STORE, { paper = "roll", items = true } = {}
   const body = st.bills.length || st.openingDue > 0
     ? `${st.openingDue > 0 ? row(`Brought forward${st.from ? ` (before ${fmtDay(st.from)})` : ""}`, INR(st.openingDue), "bf") : ""}
        ${billBlocks}
+       ${st.bills.length ? "" : `<div class="note">Nothing taken on credit in this period.</div>`}
        <div class="rule"></div>
        ${st.openingDue > 0 ? row("Brought forward", INR(st.openingDue)) : ""}
-       ${row(`Billed (${st.totals.billCount} bill${st.totals.billCount === 1 ? "" : "s"})`, INR(st.totals.billed))}
+       ${st.totals.billCount > 0 ? row(escapeHtml(billedLabel(st)), INR(st.totals.billed)) : ""}
        ${st.totals.paid > 0 ? row("Paid so far", "− " + INR(st.totals.paid)) : ""}
        ${row("BALANCE DUE", INR(due), "tot")}
        ${st.laterDue > 0 ? `<div class="note">Not included: ${INR(st.laterDue)} on bills after ${fmtDay(st.to)}.</div>` : ""}`
@@ -4885,12 +4894,15 @@ const byDateTimeDesc = (a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1)
 // period-bound — and the date range is there for "bill me for August".
 const stmtRange = (preset, cfrom, cto) => {
   const now = new Date();
+  // "Today" is the closing-time bill: everything this customer took on credit today,
+  // with whatever they already owed carried in above it.
+  if (preset === "today") return { from: todayStr(), to: todayStr() };
   if (preset === "month") return { from: dateStr(new Date(now.getFullYear(), now.getMonth(), 1)), to: todayStr() };
   if (preset === "30d") { const d = new Date(); d.setDate(d.getDate() - 29); return { from: dateStr(d), to: todayStr() }; }
   if (preset === "custom") return { from: cfrom || "", to: cto || "" };
   return { from: "", to: "" };
 };
-const STMT_PRESETS = [["all", "All unpaid"], ["month", "This month"], ["30d", "Last 30 days"], ["custom", "Custom range"]];
+const STMT_PRESETS = [["all", "All unpaid"], ["today", "Today"], ["month", "This month"], ["30d", "Last 30 days"], ["custom", "Custom range"]];
 
 // Plain-text form of the statement — for pasting into WhatsApp, which is how most
 // customers actually get told what they owe.
@@ -5027,9 +5039,10 @@ function StatementPreview({ sales, store, initialCustomer, onClose, notify, log 
                     {b.paid > 0 && <Row indent bold l="Due on this bill" r={INR(b.due)} style={{ color: "#C44536" }} />}
                   </div>
                 ))}
+                {!st.bills.length && <div style={{ textAlign: "center", color: "#8A9C90", padding: "6px 0" }}>Nothing taken on credit in this period.</div>}
                 <div style={rule} />
                 {st.openingDue > 0 && <Row l="Brought forward" r={INR(st.openingDue)} />}
-                <Row l={`Billed (${st.totals.billCount} bill${st.totals.billCount === 1 ? "" : "s"})`} r={INR(st.totals.billed)} />
+                {st.totals.billCount > 0 && <Row l={billedLabel(st)} r={INR(st.totals.billed)} />}
                 {st.totals.paid > 0 && <Row l="Paid so far" r={"− " + INR(st.totals.paid)} />}
                 <Row bold l="BALANCE DUE" r={INR(st.totals.closingDue)} style={{ borderTop: "1px solid #333", borderBottom: "1px solid #333", marginTop: 4, padding: "4px 0", fontSize: 14 }} />
                 {st.laterDue > 0 && (
