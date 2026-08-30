@@ -17,6 +17,7 @@ import { parseFile, parseRawText } from "./lib/parse.js";
 import { itemBarcodes, findItemByBarcode, findBarcodeClash, cleanBarcodeList, parseBarcodeText, withBarcodeSep, looksLikeBarcode } from "./lib/barcodes.js";
 import { exportJson, exportXlsx, importXlsx } from "./lib/backup.js";
 import { uploadBillProof, deleteBillProof, PROOF_ACCEPT, MAX_PROOF_BYTES } from "./lib/bills.js";
+import { buildStatement, udhariCustomers, periodLabel } from "./lib/statement.js";
 import {
   PAYMENT_METHODS, PAYMENT_STATUS, DAILY_CATEGORIES, itemsForCategory,
   blankDailyBill, validateDailyBill, dailyOutstanding, makeDailyBill,
@@ -63,6 +64,9 @@ const fmtQty = (qty, unit) => {
 const dateStr = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayStr = () => dateStr(new Date());
+// "2026-08-12" -> "12 Aug 2026". Used wherever a stored date is shown to a customer
+// (statements) rather than to the shopkeeper, who reads the raw ISO form fine.
+const fmtDay = (d) => (d ? new Date(d + "T00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 // A short, human-readable bill reference derived from the (already-unique) sale id: last 6 chars,
 // upper-cased. Printed on the receipt AND stamped into the UPI note so a received payment can be
@@ -246,6 +250,154 @@ function printReceipt(sale, store = STORE) {
       <div class="cap">Scan to Pay${dynQr ? " " + INR(sale.total) : ""} · PhonePe / UPI</div>
     </div>`,
     "Receipt"
+  );
+}
+
+// Build a consolidated udhari statement — every bill a customer still owes on, each with its
+// date, time, items and part-payments — and send it to the printer.
+// PRESENTATION ONLY: every figure comes from buildStatement() (src/lib/statement.js); this only
+// lays them out. The two paper sizes share one DOM and swap stylesheets — "roll" is the same 72mm
+// thermal format as a receipt (what the counter printer holds), "a4" is for a long account that
+// would otherwise run a metre of paper. Printed via printHtml() → works on phones too.
+function printStatement(st, store = STORE, { paper = "roll", items = true } = {}) {
+  const logoUrl = store.logo ? store.logo : assetUrl(LOGO_SRC);
+  const due = st.totals.closingDue;
+  // A pay-the-balance QR: the customer's UPI app opens with the whole outstanding pre-filled,
+  // and the note carries their name so an incoming payment is recognisable.
+  const upiUri = due > 0 ? upiPayUri({ vpa: store.upiId, name: store.upiName || store.name, amount: due, note: "Udhari " + st.customer }) : "";
+  const dynQr = !!upiUri;
+  const qrUrl = dynQr ? qrDataUrl(upiUri) : store.paymentQr ? store.paymentQr : assetUrl(PAYMENT_QR_SRC);
+  const now = new Date();
+  const when = `${fmtDay(todayStr())}, ${now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`;
+  const row = (label, value, cls = "") => `<div class="row ${cls}"><span>${label}</span><span>${value}</span></div>`;
+
+  const billBlocks = st.bills
+    .map((b) => {
+      const lineRows =
+        items && b.lines.length
+          ? `<table class="items">${b.lines
+              .map((l) => {
+                const unit = l.unit ? `/${escapeHtml(String(l.unit))}` : "";
+                const sub = !l.misc && l.price != null && l.price !== "" ? `<span class="sub">@ ${INR(l.price)}${unit}</span>` : "";
+                return `<tr><td class="col-name"><span class="nm">${escapeHtml(l.name)}</span>${sub}</td><td class="col-qty">${escapeHtml(fmtQty(l.qty, l.unit))}</td><td class="col-amt">${INR(l.amount)}</td></tr>`;
+              })
+              .join("")}</table>`
+          : "";
+      const disc =
+        b.discount > 0
+          ? row("Subtotal", INR(b.subtotal)) + row(`Discount${b.discountPct ? ` (${b.discountPct}%)` : ""}`, "−" + INR(b.discount))
+          : "";
+      // The bill total repeats at the foot of the block only when something came between it and
+      // the header line (items or a discount) — otherwise the header already says it.
+      const restate = lineRows || disc ? row("Bill total", INR(b.total), "bt") : "";
+      const pays = b.payments
+        .map((p) => row(`Paid ${fmtDay(p.date)}${p.time ? ", " + escapeHtml(p.time) : ""}${p.mode ? ` (${escapeHtml(p.mode)})` : ""}`, "− " + INR(p.amount), "pay"))
+        .join("");
+      return `<div class="bill">
+        <div class="row bhead"><span>#${escapeHtml(b.ref)} &nbsp;·&nbsp; ${fmtDay(b.date)}${b.time ? " · " + escapeHtml(b.time) : ""}</span><span>${INR(b.total)}</span></div>
+        ${lineRows}${disc}${restate}${pays}
+        ${b.paid > 0 ? row("Due on this bill", INR(b.due), "due") : ""}
+      </div>`;
+    })
+    .join("");
+
+  const body = st.bills.length || st.openingDue > 0
+    ? `${st.openingDue > 0 ? row(`Brought forward${st.from ? ` (before ${fmtDay(st.from)})` : ""}`, INR(st.openingDue), "bf") : ""}
+       ${billBlocks}
+       <div class="rule"></div>
+       ${st.openingDue > 0 ? row("Brought forward", INR(st.openingDue)) : ""}
+       ${row(`Billed (${st.totals.billCount} bill${st.totals.billCount === 1 ? "" : "s"})`, INR(st.totals.billed))}
+       ${st.totals.paid > 0 ? row("Paid so far", "− " + INR(st.totals.paid)) : ""}
+       ${row("BALANCE DUE", INR(due), "tot")}
+       ${st.laterDue > 0 ? `<div class="note">Not included: ${INR(st.laterDue)} on bills after ${fmtDay(st.to)}.</div>` : ""}`
+    : `<div class="note">No unpaid bills in this period. Account clear. 🎉</div>`;
+
+  printHtml(
+    `<style>
+    ${paper === "a4"
+      ? `@page { size: A4; margin: 14mm 12mm; }
+         html, body { background:#fff; }
+         body { color:#000; font-family: Arial, Helvetica, sans-serif; font-size: 11.5pt; line-height:1.45; }
+         .logo { height:16mm; }
+         .shop { font-size:19pt; }
+         .addr, .meta { font-size:10pt; }
+         .title { font-size:13pt; letter-spacing:.14em; }
+         .bill { break-inside: avoid; page-break-inside: avoid; }
+         .col-qty { width:26mm; }
+         .col-amt { width:32mm; }
+         .row.tot { font-size:14pt; }`
+      : `/* 72mm thermal roll: size:auto height => no blank feed, margin:0 => no scaling.
+            Courier + weight 600 fires more dots per glyph, which is what keeps a 203dpi
+            thermal head legible. 4mm side padding keeps right-aligned amounts off the edge. */
+         @page { size: 72mm auto; margin: 0; }
+         html, body { width: 72mm; background:#fff; }
+         body { width:72mm; padding: 3mm 4mm 8mm; color:#000;
+           font-family:'Courier New', Courier, monospace; font-size:12px; font-weight:600; line-height:1.35; }
+         .logo { height:12mm; }
+         .shop { font-size:15px; }
+         .addr, .meta { font-size:11px; }
+         .title { font-size:12px; letter-spacing:.1em; }
+         .col-qty { width:8mm; }
+         .col-amt { width:18mm; }
+         .row.tot { font-size:14px; }`}
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .logo { display:block; margin:0 auto 1mm; object-fit:contain; }
+    /* Devanagari-capable stack so a Marathi/Hindi shop name renders. */
+    .shop { text-align:center; font-weight:700; line-height:1.2; font-family:'Nirmala UI','Segoe UI',Arial,sans-serif; }
+    .addr { text-align:center; line-height:1.3; margin-top:1px; font-family:'Nirmala UI','Segoe UI',Arial,sans-serif; }
+    .title { text-align:center; font-weight:800; margin:2mm 0 1mm; }
+    .meta { line-height:1.35; }
+    .who { font-weight:700; font-size:1.15em; font-family:'Nirmala UI','Segoe UI',Arial,sans-serif; }
+    .rule { border-top:1px dashed #000; margin:2mm 0; }
+    /* baseline + min-width:0: a long label (a wrapped item name, a dated payment line) wraps
+       inside its own span on a 72mm roll while the amount stays on one line, aligned to the
+       label's first line rather than floating to the bottom of the wrapped block. */
+    .row { display:flex; justify-content:space-between; align-items:baseline; gap:4mm; padding:1px 0; }
+    .row span:first-child { min-width:0; overflow-wrap:anywhere; }
+    .row span:last-child { white-space:nowrap; text-align:right; }
+    .bill { margin-top:2mm; }
+    .row.bhead { font-weight:700; border-bottom:1px dotted #000; padding-bottom:1px; }
+    .row.pay, .row.bt { padding-left:3mm; }
+    .row.due { padding-left:3mm; font-weight:700; }
+    .row.bf { font-weight:700; }
+    .row.tot { font-weight:800; border-top:1px solid #000; border-bottom:1px solid #000; margin-top:1mm; padding:1mm 0; }
+    /* Fixed columns => name / qty / amount stay aligned however names wrap. */
+    table.items { width:100%; border-collapse:collapse; table-layout:fixed; margin:1px 0; }
+    table.items td { vertical-align:top; padding:1px 0; }
+    .col-name { padding-left:3mm; padding-right:1.5mm; overflow-wrap:break-word; }
+    .col-name .nm { display:block; padding-left:2.5mm; text-indent:-2.5mm; overflow-wrap:anywhere; }
+    .col-name .sub { display:block; padding-left:2.5mm; font-size:.92em; }
+    .col-qty { text-align:right; white-space:nowrap; padding-right:1.5mm; }
+    .col-amt { text-align:right; white-space:nowrap; }
+    .note { margin-top:2mm; font-size:.92em; text-align:center; }
+    .ft { text-align:center; margin-top:2mm; }
+    .sign { margin-top:8mm; display:flex; justify-content:space-between; font-size:.92em; }
+    .sign span { border-top:1px dotted #000; padding-top:1mm; width:45%; text-align:center; }
+    .qr { text-align:center; margin-top:3mm; }
+    .qr img { width:40mm; height:40mm; object-fit:contain; }
+    .qr img.gen { image-rendering: pixelated; image-rendering: crisp-edges; }
+    .qr .cap { font-size:.92em; font-weight:700; margin-top:1mm; }
+    </style>
+    <img class="logo" src="${logoUrl}" alt="" onerror="this.style.display='none'" />
+    <div class="shop">${escapeHtml(store.name)}</div>
+    <div class="addr">${escapeHtml(store.address)}</div>
+    ${store.phone ? `<div class="addr">☎ ${escapeHtml(store.phone)}</div>` : ""}
+    <div class="title">UDHARI STATEMENT</div>
+    <div class="rule"></div>
+    <div class="who">${escapeHtml(st.customer)}</div>
+    ${st.mobile ? `<div class="meta">☎ ${escapeHtml(st.mobile)}</div>` : ""}
+    <div class="meta">Period: ${escapeHtml(periodLabel(st.from, st.to, fmtDay))}</div>
+    <div class="meta">Statement date: ${escapeHtml(when)}</div>
+    <div class="rule"></div>
+    ${body}
+    <div class="ft">Thank you! Please settle at your convenience.</div>
+    ${paper === "a4" ? `<div class="sign"><span>Customer signature</span><span>For ${escapeHtml(store.name)}</span></div>` : ""}
+    ${due > 0 ? `<div class="qr">
+      <img class="${dynQr ? "gen" : ""}" src="${qrUrl}" alt="Scan to pay" onerror="this.style.display='none'" />
+      <div class="cap">Scan to Pay${dynQr ? " " + INR(due) : ""} · PhonePe / UPI</div>
+    </div>` : ""}`,
+    `Udhari statement — ${st.customer}`,
   );
 }
 
@@ -1331,7 +1483,7 @@ function StoreManager({ user, onLogout }) {
         ) : tab === "stats" ? (
           <Stats sales={sales} expenses={expenses} items={items} />
         ) : tab === "udhari" ? (
-          <Udhari sales={sales} setSales={setSalesW} notify={notify} log={addLog} />
+          <Udhari sales={sales} store={store} setSales={setSalesW} notify={notify} log={addLog} />
         ) : tab === "expense" ? (
           <Expenses expenses={expenses} setExpenses={setExpensesW} notify={notify} log={addLog} />
         ) : tab === "vendorbills" ? (
@@ -4729,12 +4881,188 @@ const timeToMin = (t) => {
 // Newest-first comparator for {date,time} records: date descending, then time descending.
 const byDateTimeDesc = (a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : timeToMin(b.time) - timeToMin(a.time));
 
-function Udhari({ sales, setSales, notify, log }) {
+// Window presets for a statement. "All unpaid" is the honest default — a debt isn't
+// period-bound — and the date range is there for "bill me for August".
+const stmtRange = (preset, cfrom, cto) => {
+  const now = new Date();
+  if (preset === "month") return { from: dateStr(new Date(now.getFullYear(), now.getMonth(), 1)), to: todayStr() };
+  if (preset === "30d") { const d = new Date(); d.setDate(d.getDate() - 29); return { from: dateStr(d), to: todayStr() }; }
+  if (preset === "custom") return { from: cfrom || "", to: cto || "" };
+  return { from: "", to: "" };
+};
+const STMT_PRESETS = [["all", "All unpaid"], ["month", "This month"], ["30d", "Last 30 days"], ["custom", "Custom range"]];
+
+// Plain-text form of the statement — for pasting into WhatsApp, which is how most
+// customers actually get told what they owe.
+function statementText(st, store) {
+  const L = [store.name, `Udhari statement — ${st.customer}`, periodLabel(st.from, st.to, fmtDay), ""];
+  if (st.openingDue > 0) L.push(`Brought forward: ${INR(st.openingDue)}`);
+  st.bills.forEach((b) => {
+    L.push(`#${b.ref} · ${fmtDay(b.date)}${b.time ? " · " + b.time : ""} — ${INR(b.total)}${b.paid > 0 ? ` (paid ${INR(b.paid)}, due ${INR(b.due)})` : ""}`);
+  });
+  if (!st.bills.length && st.openingDue <= 0) L.push("No unpaid bills in this period.");
+  L.push("", `BALANCE DUE: ${INR(st.totals.closingDue)}`);
+  if (st.laterDue > 0) L.push(`(Not included: ${INR(st.laterDue)} on bills after ${fmtDay(st.to)})`);
+  return L.join("\n");
+}
+
+// One customer's still-due bills as a single printable document, with each bill's date,
+// time, items and part-payments. Read-only — it never writes, so it works even when the
+// app is locked offline. Printing happens from this screen (printStatement).
+function StatementPreview({ sales, store, initialCustomer, onClose, notify, log }) {
+  const customers = useMemo(() => udhariCustomers(sales), [sales]);
+  const [customer, setCustomer] = useState(() => initialCustomer || (customers[0] ? customers[0].name : ""));
+  const [preset, setPreset] = useState("all");
+  const [cfrom, setCfrom] = useState(() => dateStr(new Date(new Date().getFullYear(), new Date().getMonth(), 1)));
+  const [cto, setCto] = useState(todayStr());
+  const [withItems, setWithItems] = useState(true);
+  const [paper, setPaper] = useState("roll");
+
+  const { from, to } = stmtRange(preset, cfrom, cto);
+  const st = useMemo(() => buildStatement(sales, { customer, from, to }), [sales, customer, from, to]);
+  const nothing = !st.bills.length && st.openingDue <= 0;
+  const roll = paper === "roll";
+
+  const doPrint = () => {
+    printStatement(st, store, { paper, items: withItems });
+    log("sale", `Printed udhari statement for ${st.customer} (${periodLabel(from, to, fmtDay)}) — balance ${INR(st.totals.closingDue)}`);
+    notify("Statement sent to the printer");
+  };
+  const doCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(statementText(st, store));
+      notify("Statement copied — paste it into WhatsApp");
+    } catch {
+      notify("Couldn't copy on this device — use Print instead");
+    }
+  };
+
+  // Preview rows mirror the printed layout, so what's on screen is what comes out.
+  const Row = ({ l, r, bold, indent, style }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, padding: "1px 0", paddingLeft: indent ? 12 : 0, fontWeight: bold ? 700 : 400, ...style }}>
+      <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{l}</span><span style={{ whiteSpace: "nowrap" }}>{r}</span>
+    </div>
+  );
+  const rule = { borderTop: "1px dashed #99A", margin: "6px 0" };
+
+  return (
+    <Modal title="Udhari statement" onClose={onClose} width="min(720px, 96vw)">
+      {customers.length === 0 ? (
+        <Empty text="No udhari customers yet — a statement needs at least one credit bill." />
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+            <label style={{ fontSize: 12, color: "#6B7E74", flex: 1, minWidth: 240 }}>
+              Customer
+              <select className="input" style={{ marginTop: 4 }} value={customer} onChange={(e) => setCustomer(e.target.value)} aria-label="Customer">
+                {customers.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}{c.mobile ? ` · ${c.mobile}` : ""} — {c.outstanding > 0 ? `${INR(c.outstanding)} due` : "settled"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+            {STMT_PRESETS.map(([k, label]) => (
+              <button key={k} className={"btn small" + (preset === k ? " primary" : "")} onClick={() => setPreset(k)}>{label}</button>
+            ))}
+            {preset === "custom" && (
+              <>
+                <label style={{ fontSize: 12, color: "#6B7E74" }}>From <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} max={cto || todayStr()} value={cfrom} onChange={(e) => setCfrom(e.target.value)} /></label>
+                <label style={{ fontSize: 12, color: "#6B7E74" }}>To <input type="date" className="input" style={{ width: "auto", marginLeft: 4 }} max={todayStr()} value={cto} onChange={(e) => setCto(e.target.value)} /></label>
+              </>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center", marginBottom: 12, fontSize: 12, color: "#6B7E74" }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input type="checkbox" checked={withItems} onChange={(e) => setWithItems(e.target.checked)} /> Item details
+            </label>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              Paper
+              <button className={"btn small" + (roll ? " primary" : "")} onClick={() => setPaper("roll")}>Roll 72mm</button>
+              <button className={"btn small" + (!roll ? " primary" : "")} onClick={() => setPaper("a4")}>A4</button>
+            </span>
+          </div>
+
+          <div style={{
+            background: "#fff", border: "1px solid #E2EAE3", borderRadius: 10, padding: "14px 16px",
+            maxHeight: "44vh", overflow: "auto", margin: "0 auto",
+            fontFamily: roll ? "'Courier New', Courier, monospace" : "inherit",
+            fontSize: 12.5, lineHeight: 1.4, width: roll ? "min(340px, 100%)" : "100%",
+          }}>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: 14 }}>{store.name}</div>
+            <div style={{ textAlign: "center", fontSize: 11, color: "#566" }}>{store.address}</div>
+            <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: ".1em", margin: "6px 0 2px" }}>UDHARI STATEMENT</div>
+            <div style={rule} />
+            <div style={{ fontWeight: 700, fontSize: 14 }}>{st.customer}</div>
+            {st.mobile && <div style={{ fontSize: 11.5, color: "#566" }}>☎ {st.mobile}</div>}
+            <div style={{ fontSize: 11.5, color: "#566" }}>Period: {periodLabel(from, to, fmtDay)}</div>
+            <div style={{ fontSize: 11.5, color: "#566" }}>Statement date: {fmtDay(todayStr())}</div>
+            <div style={rule} />
+
+            {nothing ? (
+              <div style={{ textAlign: "center", color: "#1B5E43", padding: "10px 0" }}>No unpaid bills in this period. Account clear. 🎉</div>
+            ) : (
+              <>
+                {st.openingDue > 0 && <Row l={`Brought forward${from ? ` (before ${fmtDay(from)})` : ""}`} r={INR(st.openingDue)} bold />}
+                {st.bills.map((b) => (
+                  <div key={b.id} style={{ marginTop: 8 }}>
+                    <Row l={`#${b.ref} · ${fmtDay(b.date)}${b.time ? " · " + b.time : ""}`} r={INR(b.total)} bold style={{ borderBottom: "1px dotted #AAB" }} />
+                    {withItems && b.lines.map((l, i) => (
+                      <Row key={i} indent l={`${l.name} × ${fmtQty(l.qty, l.unit)}`} r={INR(l.amount)} />
+                    ))}
+                    {b.discount > 0 && (
+                      <>
+                        <Row l="Subtotal" r={INR(b.subtotal)} />
+                        <Row l={`Discount${b.discountPct ? ` (${b.discountPct}%)` : ""}`} r={"− " + INR(b.discount)} />
+                      </>
+                    )}
+                    {(withItems && b.lines.length > 0) || b.discount > 0 ? <Row indent l="Bill total" r={INR(b.total)} /> : null}
+                    {b.payments.map((p) => (
+                      <Row key={p.id} indent l={`Paid ${fmtDay(p.date)}${p.time ? ", " + p.time : ""}${p.mode ? ` (${p.mode})` : ""}`} r={"− " + INR(p.amount)} style={{ color: "#1B5E43" }} />
+                    ))}
+                    {b.paid > 0 && <Row indent bold l="Due on this bill" r={INR(b.due)} style={{ color: "#C44536" }} />}
+                  </div>
+                ))}
+                <div style={rule} />
+                {st.openingDue > 0 && <Row l="Brought forward" r={INR(st.openingDue)} />}
+                <Row l={`Billed (${st.totals.billCount} bill${st.totals.billCount === 1 ? "" : "s"})`} r={INR(st.totals.billed)} />
+                {st.totals.paid > 0 && <Row l="Paid so far" r={"− " + INR(st.totals.paid)} />}
+                <Row bold l="BALANCE DUE" r={INR(st.totals.closingDue)} style={{ borderTop: "1px solid #333", borderBottom: "1px solid #333", marginTop: 4, padding: "4px 0", fontSize: 14 }} />
+                {st.laterDue > 0 && (
+                  <div style={{ fontSize: 11.5, color: "#8A5A00", marginTop: 6, textAlign: "center" }}>
+                    Not included: {INR(st.laterDue)} on bills after {fmtDay(to)}.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+            <button className="btn primary" disabled={nothing} onClick={doPrint}>🖨 Print statement</button>
+            <button className="btn" disabled={nothing} onClick={doCopy}>Copy for WhatsApp</button>
+            <button className="btn ghost" style={{ marginLeft: "auto" }} onClick={onClose}>Close</button>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>
+            Only bills still owing are listed. A date range filters by bill date — anything unpaid from before it is carried in as “Brought forward”, so the balance is always the real one.
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function Udhari({ sales, store, setSales, notify, log }) {
   const [openCust, setOpenCust] = useState(() => new Set()); // expanded customer names
   const [openBills, setOpenBills] = useState(() => new Set()); // expanded bills (showing order details)
   const [paying, setPaying] = useState(null); // the sale (bill) a repayment is being recorded against
   const [payAmt, setPayAmt] = useState("");
   const [payMode, setPayMode] = useState("Cash");
+  // Statement screen: null = closed; a customer name (or "" for "whoever is first") = open.
+  const [stmtFor, setStmtFor] = useState(null);
 
   const udhari = useMemo(() => {
     const u = sales.filter((s) => s.payment === "Udhari");
@@ -4866,7 +5194,9 @@ function Udhari({ sales, setSales, notify, log }) {
 
   return (
     <div>
-      <Header title="Udhari / Credit" sub="Outstanding credit by customer, across all time." />
+      <Header title="Udhari / Credit" sub="Outstanding credit by customer, across all time.">
+        <button className="btn small" onClick={() => setStmtFor("")}>📄 Statement</button>
+      </Header>
       <div style={S.cards}>
         <Card label="Outstanding credit" value={INR(udhari.totalOutstanding)} sub={udhari.withDue.length + " customer(s) owe"} accent />
         <Card label="Udhari bills" value={udhari.count} sub="total credit bills" />
@@ -4894,7 +5224,9 @@ function Udhari({ sales, setSales, notify, log }) {
                       <td style={{ color: "#677" }}>{c.mobile || "—"}</td>
                       <td style={{ textAlign: "right" }}>{c.bills}</td>
                       <td style={{ textAlign: "right", fontWeight: 700, color: "#C44536" }}>{INR(c.outstanding)}</td>
-                      <td style={{ textAlign: "right" }}>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        <button className="btn small ghost" style={{ marginRight: 6 }} title={`Full bill / statement for ${c.name}`}
+                                onClick={(e) => { e.stopPropagation(); setStmtFor(c.name); }}>📄 Bill</button>
                         <button className="btn small primary" onClick={(e) => { e.stopPropagation(); payRow(); }}>
                           {dueBills.length === 1 ? "Pay" : "Pay total"}
                         </button>
@@ -4944,7 +5276,7 @@ function Udhari({ sales, setSales, notify, log }) {
             </tbody>
           </table>
         )}
-        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>“Pay total” settles a customer's whole balance in one go (oldest bills first). Or tap a customer to expand and pay a single bill — full or part, Cash / UPI. Sales History updates automatically.</div>
+        <div style={{ fontSize: 11.5, color: "#8A9C90", marginTop: 8 }}>“Pay total” settles a customer's whole balance in one go (oldest bills first). Or tap a customer to expand and pay a single bill — full or part, Cash / UPI. Sales History updates automatically. “📄 Bill” prints one consolidated statement of everything they still owe — every bill with its date, time and items — for all time or a chosen date range.</div>
       </section>
 
       <section style={{ ...S.panel, marginTop: 16 }}>
@@ -5028,6 +5360,10 @@ function Udhari({ sales, setSales, notify, log }) {
             </div>
           </div>
         </div>
+      )}
+
+      {stmtFor !== null && (
+        <StatementPreview sales={sales} store={store} initialCustomer={stmtFor} onClose={() => setStmtFor(null)} notify={notify} log={log} />
       )}
     </div>
   );
@@ -6133,7 +6469,9 @@ const Empty = ({ text, children }) => (
   </div>
 );
 
-function Modal({ title, children, onClose }) {
+// `width` widens the dialog past the 480px default — for content that is a document
+// (a statement preview) rather than a short form.
+function Modal({ title, children, onClose, width }) {
   // Only close when the *press* started on the backdrop itself. Relying on the
   // click target alone closed the dialog whenever a drag (e.g. selecting digits
   // in a number field) began inside an input but released on the overlay.
@@ -6150,7 +6488,7 @@ function Modal({ title, children, onClose }) {
       onClick={(e) => { if (e.target === e.currentTarget && downOnOverlay.current) onClose(); }}
       role="dialog" aria-modal="true" aria-label={title}
     >
-      <div style={S.modal}>
+      <div style={width ? { ...S.modal, width } : S.modal}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
           <h2 style={{ margin: 0, fontSize: 17 }}>{title}</h2>
           <button className="btn ghost small" style={{ marginLeft: "auto" }} aria-label="Close dialog" onClick={onClose}>✕</button>
